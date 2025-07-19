@@ -329,7 +329,6 @@ pacstrap -K /mnt \
     audit \
     usbguard \
     zram-generator \
-    aide \
     conmon
 log "✅ Base system installed"
 
