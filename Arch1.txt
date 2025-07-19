@@ -19,8 +19,8 @@ NC="\033[0m"
 # Configuration Variables
 
 DISK="/dev/nvme0n1"
-HOSTNAME="jackbook"
-USERNAME="jack"
+HOSTNAME="fortress"
+USERNAME="mastermind"
 LOCALE="en_US.UTF-8"
 TIMEZONE="UTC"
 KEYMAP="us"
@@ -90,46 +90,87 @@ log "✅ System verification complete"
 }
 
 prepare_disk() {
-    log "🔧 Preparing disk with secure NVMe optimization…"
+log “🔧 Preparing disk with secure NVMe optimization…”
 
-    info "Performing NVMe sanitize. This may take several minutes."
-    # The sanitize command is NON-BLOCKING. It returns immediately while the
-    # drive's controller performs the erase in the background.
-    # We MUST poll the drive to wait for completion.
-    if ! nvme sanitize "$DISK" -a 2; then
-        warning "NVMe sanitize command failed or is not supported. Falling back to blkdiscard."
-        blkdiscard -f "$DISK" || error "Failed to wipe disk with blkdiscard."
-    else
-        info "NVMe sanitize started. Polling for completion..."
-        # Poll the sanitize status log page (log-id 0x80).
-        # The status is reported on the SPROG (Sanitize Progress) field, bits 2:0.
-        # Status '2' (0b010) means "Sanitize in Progress".
-        # We loop while the status is 2.
-        while [[ $(nvme get-log "$DISK" --log-id=0x80 --raw-binary | od -An -t u1 -j 4 -N 1 | xargs) -eq 2 ]]; do
-            info "Sanitize in progress... waiting 15 seconds."
-            sleep 15
-        done
+info "Performing NVMe sanitize. This may take several minutes."
 
-        # Final status check. A status of '1' (0b001) means "Sanitize Succeeded".
-        local sanitize_status=$(nvme get-log "$DISK" --log-id=0x80 --raw-binary | od -An -t u1 -j 4 -N 1 | xargs)
-        if [[ "$sanitize_status" -eq 1 ]]; then
-             log "✅ NVMe sanitize completed successfully."
-        else
-             error "NVMe sanitize finished with a failure status code: $sanitize_status. Aborting."
+# First, check if sanitize is supported
+if ! nvme id-ctrl "$DISK" | grep -q "sanicap"; then
+    warning "NVMe sanitize may not be supported. Attempting anyway..."
+fi
+
+# The sanitize command is NON-BLOCKING. It returns immediately while the
+# drive's controller performs the erase in the background.
+if ! nvme sanitize "$DISK" -a 2; then
+    warning "NVMe sanitize command failed or is not supported. Falling back to blkdiscard."
+    blkdiscard -f "$DISK" || error "Failed to wipe disk with blkdiscard."
+else
+    info "NVMe sanitize started. Polling for completion..."
+    
+    # Poll using the correct sanitize-log command
+    # Keep checking until sanitize is complete
+    while true; do
+        # Get sanitize status using the proper command
+        local sanitize_output=$(nvme sanitize-log "$DISK" 2>/dev/null || echo "failed")
+        
+        if [[ "$sanitize_output" == "failed" ]]; then
+            warning "Cannot read sanitize log. Assuming completion."
+            break
         fi
-    fi
+        
+        # Extract the SPROG (Sanitize Progress) field
+        # SPROG values: 0x0000 = never started, 0x0001 = completed successfully, 
+        # 0x0002 = in progress, 0x0003 = completed with failure
+        local sprog=$(echo "$sanitize_output" | grep -i "sanitize progress" | awk '{print $NF}' | sed 's/0x//')
+        
+        # If we can't parse SPROG, try alternative approach
+        if [[ -z "$sprog" ]]; then
+            # Check for "Sanitize Status" field instead
+            if echo "$sanitize_output" | grep -qi "in.*progress\|running"; then
+                sprog="02"  # In progress
+            elif echo "$sanitize_output" | grep -qi "complet.*success\|finished.*success"; then
+                sprog="01"  # Completed successfully
+            elif echo "$sanitize_output" | grep -qi "fail\|error"; then
+                sprog="03"  # Failed
+            else
+                # If we can't determine status, assume it's done
+                warning "Cannot determine sanitize status. Assuming completion."
+                break
+            fi
+        fi
+        
+        case "$sprog" in
+            "01")
+                log "✅ NVMe sanitize completed successfully."
+                break
+                ;;
+            "02")
+                info "Sanitize in progress... waiting 15 seconds."
+                sleep 15
+                ;;
+            "03")
+                error "NVMe sanitize failed. Aborting."
+                ;;
+            *)
+                info "Unknown sanitize status ($sprog). Waiting 15 seconds..."
+                sleep 15
+                ;;
+        esac
+    done
+fi
 
-    # Create GPT partition table
-    log "Creating new GPT partition table..."
-    sgdisk --clear "$DISK" || error "Failed to clear partition table with sgdisk."
-    sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" "$DISK"
-    sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" "$DISK"
+# Create GPT partition table
+log "Creating new GPT partition table..."
+sgdisk --clear "$DISK" || error "Failed to clear partition table with sgdisk."
+sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" "$DISK"
+sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" "$DISK"
 
-    # Inform kernel of partition changes
-    partprobe "$DISK"
-    sleep 2
+# Inform kernel of partition changes
+partprobe "$DISK"
+sleep 2
 
-    log "✅ Disk partitioning complete"
+log "✅ Disk partitioning complete"
+
 }
 
 
