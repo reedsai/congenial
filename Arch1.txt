@@ -19,8 +19,8 @@ NC="\033[0m"
 # Configuration Variables
 
 DISK="/dev/nvme0n1"
-HOSTNAME="fortress"
-USERNAME="mastermind"
+HOSTNAME="jackbook"
+USERNAME="jack"
 LOCALE="en_US.UTF-8"
 TIMEZONE="UTC"
 KEYMAP="us"
@@ -89,24 +89,24 @@ log "✅ System verification complete"
 
 }
 
-# Disk preparation - proper NVMe handling
 prepare_disk() {
     log "🔧 Preparing disk with secure NVMe optimization…"
 
-    # Secure erase using NVMe sanitize (faster than dd)
-    info "Performing secure NVMe sanitize... This may take a long time."
-    # sanact=2 performs a block erase. See 'nvme sanitize-log' for supported modes.
-    info "Performing blocking NVMe sanitize... This will take a long time."
-# The command will not return until the sanitize operation is complete.
-# -a 2 specifies the block erase action.
-if ! nvme sanitize "$DISK" -a 2; then
-    error "NVMe Sanitize failed. Cannot proceed securely."
-fi
-info "NVMe sanitize completed successfully."
-# Add a small, robust delay for the drive controller to become fully ready.
-sleep 3
+    info "Performing BLOCKING NVMe sanitize. The script will pause here until it is complete."
+    # The '-a 2' argument without '-s 1' tells the command to execute the
+    # block erase action AND WAIT for completion. This is the correct fix.
+    if ! nvme sanitize "$DISK" -a 2; then
+        warning "NVMe sanitize command failed or is not supported. Falling back to blkdiscard."
+        blkdiscard -f "$DISK" || error "Failed to wipe disk with blkdiscard."
+    else
+        log "✅ NVMe sanitize completed successfully."
+    fi
+
+    # Add a mandatory 3-second delay for the drive controller to become fully ready for new commands.
+    sleep 3
 
     # Create GPT partition table
+    log "Creating new GPT partition table..."
     sgdisk --clear "$DISK"
     sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" "$DISK"
     sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" "$DISK"
@@ -307,7 +307,7 @@ setup_zram() {
     # For a 32GB system, this creates a 16GB zram device.
     cat > /mnt/etc/systemd/zram-generator.conf << 'EOF'
 [zram0]
-zram-size = ram / 2
+zram-size = ram/2
 compression-algorithm = zstd
 swap-priority = 100
 EOF
