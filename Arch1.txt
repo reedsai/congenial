@@ -388,22 +388,17 @@ log "✅ System configuration complete"
 
 setup_zram() {
     log "💾 Setting up zram for high-performance, secure in-memory swap..."
-    # zram offers better performance and security as swapped memory pages never touch the disk.
-    # This mitigates risks of sensitive data being recovered from persistent storage.
-    # Hibernation is not supported with this configuration.
-    # See: https://wiki.archlinux.org/title/Zram
-
-    # This configuration creates a zstd-compressed zram device with a size of 50% of total RAM.
-    # For a 32GB system, this creates a 16GB zram device.
+    
+    # Create zram configuration - the generator will automatically create units
     cat > /mnt/etc/systemd/zram-generator.conf << 'EOF'
 [zram0]
-zram-size = ram/2
+zram-size = ram / 2
 compression-algorithm = zstd
 swap-priority = 100
 EOF
 
-    arch-chroot /mnt systemctl enable systemd-zram-generator
-    log "✅ zram configured. zswap will be disabled via kernel parameter."
+    # No need to enable anything - the generator handles this automatically
+    log "✅ zram configured. Units will be created automatically on boot."
 }
 
 # Setup systemd-boot
