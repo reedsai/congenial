@@ -132,6 +132,7 @@ prepare_disk() {
     log "✅ Disk partitioning complete"
 }
 
+
 # LUKS2 encryption - balanced performance
 
 setup_encryption() {
