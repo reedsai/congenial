@@ -96,49 +96,15 @@ prepare_disk() {
     # Secure erase using NVMe sanitize (faster than dd)
     info "Performing secure NVMe sanitize... This may take a long time."
     # sanact=2 performs a block erase. See 'nvme sanitize-log' for supported modes.
-    if ! nvme sanitize "$DISK" -s 1 -a 2; then
-        warning "NVMe sanitize failed to start or is not supported. Falling back to blkdiscard."
-        blkdiscard -f "$DISK" || error "Failed to wipe disk with blkdiscard."
-    else
-        # Poll for sanitize completion
-        info "Sanitize command issued. Polling for completion..."
-        while true; do
-            # Attempt to read the smart-log, capturing the output.
-            # We redirect stderr to /dev/null to hide "no such device" errors during the poll.
-            log_output=$(nvme smart-log "$DISK" 2>/dev/null)
-            
-            # CRITICAL CHECK: Verify the command itself succeeded. If not, the drive is busy/gone.
-            if [ $? -ne 0 ]; then
-                echo -ne "${YELLOW}[INFO]${NC} Drive is not responding. Waiting for it to reappear... \r"
-                sleep 10
-                continue
-            fi
-
-            # If the command succeeded, parse the captured output.
-            status=$(echo "$log_output" | awk '/sanitize_status/ {print $3}')
-            
-            # Check if the sanitize status field is present in the output.
-            if [ -z "$status" ]; then
-                echo -ne "${BLUE}[INFO]${NC} Sanitize status not yet available. Retrying... \r"
-                sleep 5
-                continue
-            fi
-            
-            # A status of 0x02 means "sanitize in progress". We wait until it's anything else.
-            if [[ "$status" != "0x02" ]]; then
-                echo -e "\n${GREEN}[INFO]${NC} Sanitize complete (Final Status: $status)."
-                break
-            fi
-            
-            # Display progress if the drive is responsive.
-            progress=$(echo "$log_output" | awk '/sanitize_progress/ {print $3}')
-            progress_percent=$((progress * 100 / 65535))
-            echo -ne "${BLUE}[INFO]${NC} Sanitize in progress: ${progress_percent}% complete... \r"
-            sleep 5
-        done
-        
-        info "NVMe sanitize completed successfully."
-    fi
+    info "Performing blocking NVMe sanitize... This will take a long time."
+# The command will not return until the sanitize operation is complete.
+# -a 2 specifies the block erase action.
+if ! nvme sanitize "$DISK" -a 2; then
+    error "NVMe Sanitize failed. Cannot proceed securely."
+fi
+info "NVMe sanitize completed successfully."
+# Add a small, robust delay for the drive controller to become fully ready.
+sleep 3
 
     # Create GPT partition table
     sgdisk --clear "$DISK"
