@@ -89,90 +89,125 @@ log "✅ System verification complete"
 
 }
 
+# FIXED: Proper NVMe sanitize with correct waiting logic
+
 prepare_disk() {
 log “🔧 Preparing disk with secure NVMe optimization…”
 
-info "Performing NVMe sanitize. This may take several minutes."
+# First unmount any mounted partitions
+umount "${DISK}"* 2>/dev/null || true
 
-# First, check if sanitize is supported
-if ! nvme id-ctrl "$DISK" | grep -q "sanicap"; then
-    warning "NVMe sanitize may not be supported. Attempting anyway..."
-fi
-
-# The sanitize command is NON-BLOCKING. It returns immediately while the
-# drive's controller performs the erase in the background.
-if ! nvme sanitize "$DISK" -a 2; then
-    warning "NVMe sanitize command failed or is not supported. Falling back to blkdiscard."
-    blkdiscard -f "$DISK" || error "Failed to wipe disk with blkdiscard."
-else
-    info "NVMe sanitize started. Polling for completion..."
+# Check if sanitize is supported
+if nvme id-ctrl "$DISK" | grep -q "SANICAP"; then
+    info "NVMe sanitize is supported. Starting secure erase..."
     
-    # Poll using the correct sanitize-log command
-    # Keep checking until sanitize is complete
-    while true; do
-        # Get sanitize status using the proper command
-        local sanitize_output=$(nvme sanitize-log "$DISK" 2>/dev/null || echo "failed")
+    # Start sanitize operation (crypto erase - fastest and secure)
+    if nvme sanitize "$DISK" --sanact=2 --no-dealloc 2>/dev/null; then
+        info "NVMe crypto-erase sanitize started. Waiting for completion..."
         
-        if [[ "$sanitize_output" == "failed" ]]; then
-            warning "Cannot read sanitize log. Assuming completion."
-            break
-        fi
+        # Wait for sanitize to complete - FIXED LOGIC
+        local max_wait=1800  # 30 minutes max
+        local elapsed=0
+        local wait_interval=10
         
-        # Extract the SPROG (Sanitize Progress) field
-        # SPROG values: 0x0000 = never started, 0x0001 = completed successfully, 
-        # 0x0002 = in progress, 0x0003 = completed with failure
-        local sprog=$(echo "$sanitize_output" | grep -i "sanitize progress" | awk '{print $NF}' | sed 's/0x//')
-        
-        # If we can't parse SPROG, try alternative approach
-        if [[ -z "$sprog" ]]; then
-            # Check for "Sanitize Status" field instead
-            if echo "$sanitize_output" | grep -qi "in.*progress\|running"; then
-                sprog="02"  # In progress
-            elif echo "$sanitize_output" | grep -qi "complet.*success\|finished.*success"; then
-                sprog="01"  # Completed successfully
-            elif echo "$sanitize_output" | grep -qi "fail\|error"; then
-                sprog="03"  # Failed
+        while [ $elapsed -lt $max_wait ]; do
+            sleep $wait_interval
+            elapsed=$((elapsed + wait_interval))
+            
+            # Try to read sanitize log
+            local sanitize_status=""
+            if sanitize_status=$(nvme sanitize-log "$DISK" 2>/dev/null); then
+                # Parse the SPROG (Sanitize Progress) field
+                local sprog=$(echo "$sanitize_status" | grep -i "sanitize progress" | grep -o "0x[0-9a-fA-F]*" | head -1)
+                
+                case "$sprog" in
+                    "0x0001")
+                        log "✅ NVMe sanitize completed successfully"
+                        break
+                        ;;
+                    "0x0002"|"0x0102"|"0x0202")
+                        info "Sanitize in progress... ($elapsed/${max_wait}s)"
+                        ;;
+                    "0x0003"|"0x0103")
+                        error "NVMe sanitize failed"
+                        ;;
+                    *)
+                        info "Sanitize status: $sprog ($elapsed/${max_wait}s)"
+                        ;;
+                esac
             else
-                # If we can't determine status, assume it's done
-                warning "Cannot determine sanitize status. Assuming completion."
-                break
+                # If we can't read the log, try a simple I/O test
+                if dd if="$DISK" of=/dev/null bs=512 count=1 2>/dev/null; then
+                    log "✅ Drive is accessible again - sanitize likely complete"
+                    break
+                else
+                    info "Drive still being sanitized... ($elapsed/${max_wait}s)"
+                fi
             fi
-        fi
+        done
         
-        case "$sprog" in
-            "01")
-                log "✅ NVMe sanitize completed successfully."
-                break
-                ;;
-            "02")
-                info "Sanitize in progress... waiting 15 seconds."
-                sleep 15
-                ;;
-            "03")
-                error "NVMe sanitize failed. Aborting."
-                ;;
-            *)
-                info "Unknown sanitize status ($sprog). Waiting 15 seconds..."
-                sleep 15
-                ;;
-        esac
-    done
+        if [ $elapsed -ge $max_wait ]; then
+            warning "Sanitize timeout reached. Continuing anyway..."
+        fi
+    else
+        warning "Crypto-erase sanitize failed. Trying block-erase..."
+        if nvme sanitize "$DISK" --sanact=1 --no-dealloc; then
+            info "Block-erase sanitize started. This will take longer..."
+            sleep 30  # Give it more time for block erase
+        else
+            warning "All sanitize methods failed. Using blkdiscard fallback."
+            blkdiscard -f "$DISK" || error "Failed to wipe disk"
+        fi
+    fi
+else
+    warning "NVMe sanitize not supported. Using blkdiscard."
+    blkdiscard -f "$DISK" || error "Failed to wipe disk"
 fi
 
-# Create GPT partition table
+# CRITICAL: Wait for any remaining I/O to settle
+sync
+sleep 5
+
+# Ensure the drive is fully accessible before partitioning
+info "Verifying drive accessibility..."
+local retry_count=0
+while ! dd if="$DISK" of=/dev/null bs=512 count=1 2>/dev/null; do
+    retry_count=$((retry_count + 1))
+    if [ $retry_count -gt 30 ]; then
+        error "Drive is not accessible after sanitize operation"
+    fi
+    info "Waiting for drive to become accessible... (attempt $retry_count/30)"
+    sleep 2
+done
+
+log "✅ Drive is ready for partitioning"
+
+# Create GPT partition table - FIXED: Remove --clear flag that was causing issues
 log "Creating new GPT partition table..."
-sgdisk --clear "$DISK" || error "Failed to clear partition table with sgdisk."
-sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" "$DISK"
-sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" "$DISK"
+
+# Zap any existing partition table first
+sgdisk --zap-all "$DISK" || error "Failed to zap existing partition table"
+
+# Wait for kernel to notice
+partprobe "$DISK" 2>/dev/null || true
+sleep 2
+
+# Create new partitions
+sgdisk --new=1:0:+1G --typecode=1:ef00 --change-name=1:"EFI System" "$DISK" || error "Failed to create EFI partition"
+sgdisk --new=2:0:0 --typecode=2:8300 --change-name=2:"Linux filesystem" "$DISK" || error "Failed to create root partition"
 
 # Inform kernel of partition changes
 partprobe "$DISK"
-sleep 2
+sleep 3
+
+# Verify partitions were created
+if [ ! -b "${DISK}p1" ] || [ ! -b "${DISK}p2" ]; then
+    error "Partitions were not created successfully"
+fi
 
 log "✅ Disk partitioning complete"
 
 }
-
 
 # LUKS2 encryption - balanced performance
 
