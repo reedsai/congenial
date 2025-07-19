@@ -650,10 +650,9 @@ fs.protected_regular = 2
 EOF
 
 
-# Configure journal
+# Create journald.conf.d directory and configure journal
+mkdir -p /mnt/etc/systemd/journald.conf.d
 cat > /mnt/etc/systemd/journald.conf.d/security.conf << 'EOF'
-
-
 [Journal]
 Storage=persistent
 Compress=yes
@@ -662,6 +661,11 @@ SystemMaxFileSize=100M
 MaxRetentionSec=1month
 EOF
 
+# Ensure persistent journal directory exists
+mkdir -p /mnt/var/log/journal
+
+# Set proper permissions for journal directory
+arch-chroot /mnt systemd-tmpfiles --create --prefix /var/log/journal
 
 # Set file permissions
 arch-chroot /mnt chmod 600 /etc/shadow
