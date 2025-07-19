@@ -1,0 +1,862 @@
+#!/bin/bash
+
+# 🔱 ARCH FORTRESS - PART 2: ARSENAL DEPLOYMENT 🔱
+
+# Zero-Trust Development Environment Setup
+
+# Run as user after successful Part 1 installation
+
+set -euo pipefail
+
+# Colors for output
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+NC="\033[0m"
+
+# Configuration
+
+USERNAME="mastermind"
+HOSTNAME="fortress"
+FIREFOX_PROFILE="fortress-secure"
+DNS_NETWORK="dns-isolated"
+FIREFOX_NETWORK="firefox-isolated"
+
+# Logging functions
+
+log() {
+echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+error() {
+echo -e "${RED}[ERROR]${NC} $1" >&2
+exit 1
+}
+
+warning() {
+echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+info() {
+echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# Verify Part 1 installation
+
+verify_part1() {
+log "🔍 Verifying Part 1 installation…"
+
+
+# Check if we're running as user
+if [[ $EUID -eq 0 ]]; then
+    error "Do not run Part 2 as root. Run as user $USERNAME"
+fi
+
+# Check AppArmor
+if ! sudo systemctl is-active apparmor >/dev/null 2>&1; then
+    error "AppArmor not running. Check Part 1 installation."
+fi
+
+# Check Podman
+if ! command -v podman >/dev/null 2>&1; then
+    error "Podman not found. Check Part 1 installation."
+fi
+
+log "✅ Part 1 verification complete"
+
+
+}
+
+# Install GPU drivers and CUDA
+
+setup_gpu_cuda() {
+log "🎮 Setting up NVIDIA GPU and CUDA…"
+
+
+# Install NVIDIA drivers
+sudo pacman -S --noconfirm \
+    nvidia-dkms \
+    nvidia-utils \
+    nvidia-settings \
+    lib32-nvidia-utils \
+    cuda \
+    cudnn \
+    opencl-nvidia \
+    plasma-wayland-session
+
+# Configure NVIDIA persistence
+sudo systemctl enable nvidia-persistenced
+
+# Add user to video group
+sudo usermod -a -G video $USERNAME
+
+# Configure NVIDIA settings
+sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
+
+
+# Enable NVIDIA KMS
+
+options nvidia-drm modeset=1
+
+# Security hardening
+
+options nvidia NVreg_RestrictProfilingToAdminUsers=1
+EOF
+
+
+# Update initramfs
+sudo mkinitcpio -P
+
+log "✅ NVIDIA GPU and CUDA setup complete"
+
+
+}
+
+# Install minimal KDE Plasma
+
+setup_minimal_kde() {
+log "🖥️ Installing minimal KDE Plasma…"
+
+
+# Install minimal KDE
+sudo pacman -S --noconfirm \
+    xorg-server \
+    plasma-desktop \
+    plasma-workspace \
+    kscreen \
+    plasma-systemmonitor \
+    konsole \
+    dolphin \
+    kate \
+    sddm \
+    sddm-kcm \
+    ark \
+    spectacle \
+    breeze \
+    plasma-browser-integration
+
+# Enable SDDM
+sudo systemctl enable sddm
+
+# Configure SDDM for security
+sudo tee /etc/sddm.conf > /dev/null << 'EOF'
+
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+Numlock=on
+
+[Theme]
+Current=breeze
+
+[Users]
+MaximumUid=60513
+MinimumUid=1000
+HideUsers=
+HideShells=/bin/false,/usr/bin/nologin
+
+[X11]
+MinimumVT=1
+ServerArguments=-nolisten tcp -dpi 96
+EOF
+
+
+# Disable unnecessary KDE services
+sudo systemctl mask \
+    plasma-baloorunner \
+    baloo-file \
+    baloo-file-extractor
+
+log "✅ Minimal KDE Plasma installed"
+
+
+}
+
+# Setup Technitium DNS Server
+
+setup_technitium_dns() {
+    log "🔒 Setting up Technitium DNS Server…"
+    if ! podman image exists technitium/dns-server:latest; then
+        log "Pulling Technitium DNS image..."
+        podman pull technitium/dns-server:latest || error "Failed to pull Technitium DNS image. Check network and DNS settings."
+    fi
+
+    mkdir -p "$HOME/.local/share/technitium-dns"
+    mkdir -p "$HOME/.config/systemd/user"
+
+    podman create \
+        --name technitium-dns \
+        --replace \
+        --network "$DNS_NETWORK" \
+        --ip 172.20.0.10 \
+        -p 127.0.0.1:5380:5380/tcp \
+        -p 127.0.0.1:53:53/udp \
+        -p 127.0.0.1:53:53/tcp \
+        -v "$HOME/.local/share/technitium-dns:/etc/dns:Z" \
+        --security-opt "apparmor=technitium-dns" \
+        --memory=512m \
+        --cpus=1 \
+        technitium/dns-server:latest
+
+    podman generate systemd --new --name technitium-dns --files -o "$HOME/.config/systemd/user/container-technitium-dns.service"
+    systemctl --user daemon-reload
+    systemctl --user enable --now container-technitium-dns.service
+
+    log "Waiting for Technitium DNS to stabilize..."
+    sleep 15
+
+    if ! systemctl --user is-active --quiet container-technitium-dns.service; then
+        error "Technitium DNS container failed to start. Cannot proceed."
+    fi
+
+    log "Updating host DNS settings to use the container..."
+    sudo tee /etc/systemd/resolved.conf > /dev/null << 'EOF'
+[Resolve]
+DNS=127.0.0.1
+Domains=~.
+DNSSEC=yes
+DNSOverTLS=opportunistic
+Cache=yes
+DNSStubListener=yes
+EOF
+
+    sudo systemctl restart systemd-resolved
+    log "✅ Technitium DNS Server configured"
+    info "Access DNS admin at: http://127.0.0.1:5380"
+}
+
+# Setup Firefox with AppArmor isolation
+
+setup_firefox_isolation() {
+log "🦊 Setting up Firefox with AppArmor isolation…"
+
+
+# Install Firefox
+sudo pacman -S --noconfirm firefox
+
+# Create Firefox AppArmor profile
+sudo tee /etc/apparmor.d/firefox-fortress > /dev/null << 'EOF'
+
+
+# Firefox security profile for Fortress
+
+#include <tunables/global>
+
+profile firefox-fortress /usr/lib/firefox/firefox flags=(attach_disconnected) {
+#include <abstractions/base>
+#include <abstractions/audio>
+#include <abstractions/dbus-session-strict>
+#include <abstractions/dbus-accessibility-strict>
+#include <abstractions/fonts>
+#include <abstractions/freedesktop.org>
+#include <abstractions/mesa>
+#include <abstractions/nameservice>
+#include <abstractions/openssl>
+#include <abstractions/p11-kit>
+#include <abstractions/ssl_certs>
+#include <abstractions/user-tmp>
+#include <abstractions/wayland>
+#include <abstractions/x11>
+
+owner @{HOME}/.config/dconf/user r,
+owner @{HOME}/.cache/fontconfig/ rw,
+owner @{HOME}/.cache/fontconfig/** rw,
+
+# Firefox binary and libraries
+/usr/lib/firefox/firefox rix,
+/usr/lib/firefox/** r,
+/usr/lib/firefox/plugin-container ix,
+/usr/lib/firefox/firefox-bin rix,
+
+# Firefox profile directory (restricted)
+owner @{HOME}/.mozilla/firefox/fortress-secure/** rw,
+owner @{HOME}/.mozilla/firefox/profiles.ini r,
+owner @{HOME}/.mozilla/firefox/installs.ini r,
+
+# Downloads directory (restricted)
+owner @{HOME}/Downloads/firefox/** rw,
+owner @{HOME}/Downloads/firefox/ rw,
+
+# System directories (read-only)
+/usr/share/firefox/** r,
+/usr/share/mime/** r,
+/usr/share/applications/** r,
+/etc/firefox/** r,
+/etc/mime.types r,
+
+# Networking
+network inet dgram,
+network inet stream,
+network inet6 dgram,
+network inet6 stream,
+network netlink raw,
+
+# Process control
+/usr/bin/lsb_release Px,
+/usr/bin/basename ix,
+/usr/bin/dirname ix,
+
+# Denied access
+deny @{HOME}/.ssh/** rw,
+deny @{HOME}/.gnupg/** rw,
+deny @{HOME}/Documents/** rw,
+deny @{HOME}/.config/** rw,
+deny @{HOME}/.local/share/** rw,
+deny /etc/shadow r,
+deny /etc/passwd r,
+deny /proc/*/environ r,
+deny /sys/devices/virtual/dmi/** r,
+deny capability sys_admin,
+deny capability sys_ptrace,
+deny capability sys_module,
+
+# Temporary files
+owner /tmp/firefox-fortress/** rw,
+owner /var/tmp/firefox-fortress/** rw,
+
+
+}
+EOF
+
+
+# Create secure Firefox profile
+mkdir -p $HOME/.mozilla/firefox
+firefox -CreateProfile "$FIREFOX_PROFILE $HOME/.mozilla/firefox/fortress-secure"
+
+# Create Firefox user.js for security
+tee $HOME/.mozilla/firefox/fortress-secure/user.js > /dev/null << 'EOF'
+
+
+// Firefox Security Configuration for Fortress
+// Disable telemetry and data collection
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.unified", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("browser.newtabpage.activity-stream.feeds.telemetry", false);
+user_pref("browser.newtabpage.activity-stream.telemetry", false);
+user_pref("browser.ping-centre.telemetry", false);
+
+// Disable studies and experiments
+user_pref("app.shield.optoutstudies.enabled", false);
+user_pref("app.normandy.enabled", false);
+user_pref("app.normandy.api_url", "");
+
+// Enhanced security settings
+user_pref("security.tls.version.min", 3);
+user_pref("security.ssl.require_safe_negotiation", true);
+user_pref("security.ssl.treat_unsafe_negotiation_as_broken", true);
+user_pref("security.tls.insecure_fallback_hosts", "");
+user_pref("security.cert_pinning.enforcement_level", 2);
+
+// Privacy enhancements
+user_pref("privacy.trackingprotection.enabled", true);
+user_pref("privacy.trackingprotection.socialtracking.enabled", true);
+user_pref("privacy.resistFingerprinting", true);
+user_pref("privacy.firstparty.isolate", true);
+user_pref("network.cookie.cookieBehavior", 1);
+user_pref("network.http.referer.XOriginPolicy", 1);
+
+// Disable dangerous features
+user_pref("javascript.options.wasm", false);
+user_pref("dom.webnotifications.enabled", false);
+user_pref("geo.enabled", false);
+user_pref("media.navigator.enabled", false);
+user_pref("webgl.disabled", true);
+
+// Network isolation
+user_pref("network.proxy.type", 0);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.prefetch-next", false);
+user_pref("network.predictor.enabled", false);
+EOF
+
+
+# Load Firefox AppArmor profile
+sudo apparmor_parser -r /etc/apparmor.d/firefox-fortress
+
+# Create Firefox launcher script
+tee $HOME/.local/bin/firefox-fortress > /dev/null << 'EOF'
+#!/bin/bash
+# Launcher to enforce AppArmor profile on host Firefox
+exec aa-exec -p firefox-fortress /usr/lib/firefox/firefox "$@"
+EOF
+
+chmod +x $HOME/.local/bin/firefox-fortress
+
+log "✅ Firefox isolation configured"
+
+
+}
+
+# Setup development environment
+
+setup_development() {
+log "💻 Setting up development environment…"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Install development tools
+sudo pacman -S --noconfirm \
+    base-devel \
+    python \
+    python-pip \
+    nodejs \
+    npm \
+    rust \
+    go \
+    podman-compose \
+    podman-auto-update \
+    github-cli
+
+sudo pacman -S --needed --noconfirm rustup
+rustup default stable
+git clone https://aur.archlinux.org/paru.git && (cd paru && makepkg -si --noconfirm)
+rm -rf paru
+
+# Install VSCodium (telemetry-free VS Code)
+paru -S --noconfirm vscodium-bin
+
+# Create development directories
+mkdir -p $HOME/{Projects,AI,Scripts}
+
+# Configure Git
+git config --global init.defaultBranch main
+git config --global pull.rebase true
+git config --global core.editor vim
+
+# Create Python development environment
+python -m venv $HOME/.local/share/dev-env
+source $HOME/.local/share/dev-env/bin/activate
+pip install --upgrade pip
+pip install jupyter ipython black flake8 pylint pytest numpy pandas matplotlib scikit-learn torch torchvision torchaudio tensorflow
+
+log "✅ Development environment configured"
+
+
+}
+
+# Setup Obsidian with Syncthing
+
+setup_obsidian_syncthing() {
+log "📝 Setting up Obsidian with Syncthing…"
+
+
+# Install Obsidian and Syncthing
+paru -S --noconfirm obsidian syncthing
+
+# Create Obsidian vault directory
+mkdir -p $HOME/Documents/ObsidianVault
+
+# Create Obsidian AppArmor profile
+sudo tee /etc/apparmor.d/obsidian > /dev/null << 'EOF'
+
+
+# Obsidian security profile
+
+#include <tunables/global>
+#include <abstractions/wayland>
+#include <abstractions/x11>
+
+owner @{HOME}/.config/dconf/user r,
+owner @{HOME}/.cache/fontconfig/ rw,
+owner @{HOME}/.cache/fontconfig/** rw,
+
+profile obsidian /opt/Obsidian/obsidian flags=(attach_disconnected) {
+#include <abstractions/base>
+#include <abstractions/fonts>
+#include <abstractions/freedesktop.org>
+#include <abstractions/user-tmp>
+
+
+# Obsidian binary and libraries
+/opt/Obsidian/obsidian rix,
+/opt/Obsidian/** r,
+
+# Vault access (restricted to vault directory)
+owner @{HOME}/Documents/ObsidianVault/** rw,
+owner @{HOME}/.config/obsidian/** rw,
+
+# System directories (read-only)
+/usr/share/applications/** r,
+/usr/share/mime/** r,
+
+# Deny network access use firewalld
+#deny network inet,
+#deny network inet6,
+
+# Deny sensitive directories
+deny @{HOME}/.ssh/** rw,
+deny @{HOME}/.gnupg/** rw,
+deny @{HOME}/Downloads/** rw,
+deny capability sys_admin,
+deny capability sys_ptrace,
+deny capability sys_module,
+
+
+}
+EOF
+
+
+# Load Obsidian AppArmor profile
+sudo apparmor_parser -r /etc/apparmor.d/obsidian
+
+# Configure Syncthing
+systemctl --user enable syncthing.service
+systemctl --user start syncthing.service
+
+# Create Syncthing AppArmor profile
+sudo tee /etc/apparmor.d/syncthing > /dev/null << 'EOF'
+
+
+# Syncthing security profile
+
+#include <tunables/global>
+
+profile syncthing /usr/bin/syncthing flags=(attach_disconnected) {
+#include <abstractions/base>
+#include <abstractions/nameservice>
+#include <abstractions/openssl>
+
+
+# Syncthing binary
+/usr/bin/syncthing rix,
+
+# Configuration and data
+owner @{HOME}/.config/syncthing/** rw,
+owner @{HOME}/.local/share/syncthing/** rw,
+owner @{HOME}/Documents/ObsidianVault/** rw,
+
+# Network access for sync
+network inet dgram,
+network inet stream,
+network inet6 dgram,
+network inet6 stream,
+
+# Deny sensitive directories
+deny @{HOME}/.ssh/** rw,
+deny @{HOME}/.gnupg/** rw,
+deny @{HOME}/Downloads/** rw,
+deny capability sys_admin,
+deny capability sys_ptrace,
+deny capability sys_module,
+
+
+}
+EOF
+
+
+# Load Syncthing AppArmor profile
+sudo apparmor_parser -r /etc/apparmor.d/syncthing
+
+log "✅ Obsidian and Syncthing configured"
+info "Access Syncthing at: http://127.0.0.1:8384"
+
+
+}
+
+# Setup Snapper for snapshots
+
+setup_snapper() {
+log "📸 Setting up Snapper for snapshots…"
+
+
+# Install Snapper
+sudo pacman -S --noconfirm snapper snap-pac
+
+# Create Snapper configuration for root
+sudo snapper -c root create-config /
+
+# Create Snapper configuration for home
+sudo snapper -c home create-config /home
+
+# Configure Snapper settings for both root and home
+for config in root home; do
+    log "🔧 Configuring Snapper for '$config'..."
+    sudo snapper -c "$config" set-config \
+        "TIMELINE_CREATE=yes" \
+        "TIMELINE_LIMIT_HOURLY=5" \
+        "TIMELINE_LIMIT_DAILY=7" \
+        "TIMELINE_LIMIT_WEEKLY=0" \
+        "TIMELINE_LIMIT_MONTHLY=2" \
+        "NUMBER_CLEANUP=yes" \
+        "NUMBER_LIMIT=25" \
+        "NUMBER_LIMIT_IMPORTANT=10"
+done
+
+# Enable Snapper timers
+sudo systemctl enable --now snapper-timeline.timer
+sudo systemctl enable --now snapper-cleanup.timer
+
+# Create initial snapshot
+sudo snapper -c root create --description "Initial fortress snapshot"
+
+log "✅ Snapper configured"
+
+
+}
+
+# Setup system monitoring
+
+setup_monitoring() {
+log "📊 Setting up system monitoring…"
+
+
+# Install monitoring tools
+sudo pacman -S --noconfirm \
+    htop \
+    iotop \
+    nethogs \
+    fail2ban \
+    logwatch \
+    rkhunter
+
+# Configure fail2ban
+sudo tee /etc/fail2ban/jail.local > /dev/null << 'EOF'
+
+
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 3
+backend = systemd
+usedns = warn
+logencoding = auto
+enabled = false
+filter = %(**name**)s
+destemail = root@localhost
+sender = root@localhost
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+banaction = firewallcmd-multiport
+EOF
+
+
+# Enable fail2ban
+sudo systemctl enable --now fail2ban
+
+# Configure rkhunter
+sudo rkhunter --update
+sudo rkhunter --propupd
+
+# Create monitoring script
+tee $HOME/.local/bin/fortress-status > /dev/null << 'EOF'
+
+
+#!/bin/bash
+
+# Fortress System Status
+
+echo "🔱 FORTRESS STATUS REPORT 🔱"
+echo "=================================="
+echo
+
+echo "📊 System Resources:"
+echo "CPU: $(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage "%"}')"
+echo "Memory: $(free | grep Mem | awk '{printf("%.1f%%\n", $3/$2 * 100.0)}')"
+echo "Disk: $(df -h / | awk 'NR==2{print $5}')"
+echo
+
+echo "🔒 Security Status:"
+echo "AppArmor: $(sudo apparmor_status | grep -c 'profiles are loaded')"
+echo "Firewall: $(sudo firewall-cmd --state 2>/dev/null || echo 'inactive')"
+echo "Fail2ban: $(sudo fail2ban-client status | grep -c 'jail(s)')"
+echo
+
+echo "🐳 Container Status:"
+podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+echo
+
+echo "📸 Recent Snapshots:"
+sudo snapper -c root list -t single | tail -5
+EOF
+
+chmod +x $HOME/.local/bin/fortress-status
+
+log "✅ System monitoring configured"
+
+
+}
+
+# Apply final security hardening
+
+apply_final_hardening() {
+log "🔐 Applying final security hardening…"
+
+
+# Create security aliases
+tee -a $HOME/.bashrc > /dev/null << 'EOF'
+
+
+# Fortress Security Aliases
+
+alias ls='ls --color=auto'
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias firefox='firefox-fortress'
+alias status='fortress-status'
+alias ss='sudo snapper -c root create --description'
+alias sr='sudo snapper -c root'
+
+# Security-focused PATH
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# Development environment
+
+alias dev='source $HOME/.local/share/dev-env/bin/activate'
+EOF
+
+
+# Set proper permissions
+chmod 700 $HOME/.ssh 2>/dev/null || true
+chmod 600 $HOME/.ssh/* 2>/dev/null || true
+chmod 700 $HOME/.gnupg 2>/dev/null || true
+chmod 600 $HOME/.gnupg/* 2>/dev/null || true
+
+}
+
+setup_mac_randomization() {
+    log "🔒 Configuring MAC address randomization..."
+
+    # Create a NetworkManager configuration file for MAC randomization
+    sudo tee /etc/NetworkManager/conf.d/00-macrandomize.conf > /dev/null << 'EOF'
+# Enable MAC address randomization for privacy
+[device]
+# Randomize MAC address during Wi-Fi scans
+wifi.scan-rand-mac-address=yes
+
+[connection]
+# Use a stable, per-network random MAC address for Wi-Fi
+wifi.cloned-mac-address=stable
+# Use a stable, random MAC address for Ethernet
+ethernet.cloned-mac-address=stable
+# Generate a stable ID for connections
+connection.stable-id=${CONNECTION}/${BOOT}
+EOF
+
+    log "✅ MAC address randomization enabled for new connections."
+    info "Existing connections may need to be modified with 'nmcli'."
+}
+
+setup_technitium_apparmor() {
+    log "🛡️ Creating hardened AppArmor profile for Technitium DNS..."
+
+# ...
+sudo tee /etc/apparmor.d/technitium-dns > /dev/null << 'EOF'
+#include <tunables/global>
+
+profile technitium-dns flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+
+  # Required executable for the container
+  /usr/bin/dotnet rix,
+
+  # Data directory mounted into the container
+  owner @{HOME}/.local/share/technitium-dns/** rw,
+
+  # .NET runtime needs access to system libraries and resources
+  /usr/share/dotnet/** r,
+  /usr/lib/dotnet/** mr,
+  /etc/dotnet/** r,
+  /etc/ssl/certs/** r,
+  /run/systemd/resolve/stub-resolv.conf r,
+
+  # Network access for DNS functionality
+  network inet dgram,
+  network inet stream,
+  network inet6 dgram,
+  network inet6 stream,
+
+  # Deny capabilities not required by a DNS server
+  deny capability sys_admin,
+  deny capability net_raw,
+  deny capability sys_module,
+  deny capability sys_ptrace,
+}
+EOF
+
+    sudo apparmor_parser -r /etc/apparmor.d/technitium-dns
+}
+
+# Main installation function
+
+main() {
+log "🔱 Starting Arch Fortress Installation - Part 2 🔱"
+
+
+# Verify Part 1 installation
+verify_part1
+
+# GPU and development setup
+setup_gpu_cuda
+setup_minimal_kde
+setup_development
+
+# Container and network isolation
+log "🔧 Creating isolated container networks..."
+
+# Create the network with a defined subnet that includes the container's static IP
+podman network create --subnet=172.20.0.0/16 "$DNS_NETWORK" || warning "Network '$DNS_NETWORK' may already exist."
+setup_technitium_apparmor
+setup_technitium_dns
+
+# Application isolation
+setup_firefox_isolation
+setup_obsidian_syncthing
+
+# System maintenance
+setup_snapper
+setup_monitoring
+
+# Final hardening
+apply_final_hardening
+
+# Mac randomization
+setup_mac_randomization
+
+log "✅ Enabling Podman auto-update for containers..."
+systemctl --user enable --now podman-auto-update.timer
+podman auto-update
+
+log "🎉 Arch Fortress Part 2 Installation Complete! 🎉"
+log "📋 Next steps:"
+log "   1. Reboot to load GPU drivers"
+log "   2. Configure Technitium DNS at http://127.0.0.1:5380"
+log "   3. Set up Syncthing at http://127.0.0.1:8384"
+log "   4. Run 'fortress-status' to check system"
+log "   5. Use 'firefox-fortress' for secure browsing"
+info "📦 For AUR packages like 'vscodium-bin', follow the secure manual procedure:"
+info "   1. git clone <AUR_URL>"
+info "   2. cd <package_directory>"
+info "   3.!!! CRITICALLY REVIEW the PKGBUILD file for safety!!!"
+info "   4. makepkg -si"
+info "🛡️ Your fortress is now fully operational!"
+info "Remember: Only trust verified code and keep your system updated."
+
+read -p "Press Enter to reboot and complete setup..."
+sudo reboot
+
+
+}
+
+# Check if running as correct user
+
+if [[ "$(whoami)" != "$USERNAME" ]]; then
+error "Run this script as user $USERNAME"
+fi
+
+# Execute main function
+
+main "$@"
