@@ -408,7 +408,6 @@ sudo pacman -S --noconfirm \
     rust \
     go \
     podman-compose \
-    podman-auto-update \
     github-cli
 
 sudo pacman -S --needed --noconfirm rustup
