@@ -583,7 +583,6 @@ setup_fortress_dns() {
     # --- INSTALLATION ---
     log "Installing Unbound and DNSCrypt-Proxy..."
 
-sudo mkdir -p /etc/dnscrypt-proxy
     # This script is tailored for Arch Linux.
     sudo pacman -S --needed --noconfirm unbound dnscrypt-proxy irqbalance
 
