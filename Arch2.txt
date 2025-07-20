@@ -587,6 +587,9 @@ setup_fortress_dns() {
 
     # --- CONFIGURATION: DNSCrypt-Proxy (The Armored Transport) ---
     log "Configuring dnscrypt-proxy for Oblivious DoH transport..."
+
+sudo mkdir -p /etc/dnscrypt-proxy/
+
     sudo tee /etc/dnscrypt-proxy/dnscrypt-proxy.toml > /dev/null << 'EOF'
 # This instance is ONLY for Unbound's recursive lookups.
 # We prioritize servers that support Anonymized DNS (ODoH).
