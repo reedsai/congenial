@@ -177,6 +177,8 @@ log "✅ Minimal KDE Plasma installed"
 setup_firefox_isolation() {
 log "🦊 Setting up Firefox with AppArmor isolation…"
 
+# Explicitly install apparmor to ensure all abstractions are present
+sudo pacman -S --noconfirm apparmor
 
 # Install Firefox
 sudo pacman -S --noconfirm firefox
