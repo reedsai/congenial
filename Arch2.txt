@@ -57,6 +57,7 @@ fi
 # Check AppArmor
 if ! sudo systemctl is-active apparmor >/dev/null 2>&1; then
     error "AppArmor not running. Check Part 1 installation."
+#sudo systemctl enable apparmor.service
 fi
 
 # Check Podman
@@ -83,8 +84,7 @@ sudo pacman -S --noconfirm \
     lib32-nvidia-utils \
     cuda \
     cudnn \
-    opencl-nvidia \
-    plasma-wayland-session
+    opencl-nvidia
 
 # Configure NVIDIA persistence
 sudo systemctl enable nvidia-persistenced
