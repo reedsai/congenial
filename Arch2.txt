@@ -405,7 +405,6 @@ sudo pacman -S --noconfirm \
     python-pip \
     nodejs \
     npm \
-    rust \
     go \
     podman-compose \
     github-cli
