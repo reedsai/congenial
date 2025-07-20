@@ -369,16 +369,26 @@ log "✅ Firefox isolation configured"
 
 # Setup development environment with proper Python version management
 
+# Setup development environment with proper Python version management
+
 setup_development() {
 log "💻 Setting up development environment…"
 export PATH="$HOME/.local/bin:$PATH"
 
 
-# Install development tools including pyenv for Python version management
+# Install development tools and optimized Python stack
 sudo pacman -S --noconfirm \
     base-devel \
-    python \
+    python-numpy \
+    python-scipy \
+    python-pandas \
+    python-matplotlib \
+    python-scikit-learn \
+    python-pytorch-cuda \
+    python-tensorflow-cuda \
+    python-jupyter \
     python-pip \
+    python-virtualenv \
     nodejs \
     npm \
     go \
@@ -386,23 +396,14 @@ sudo pacman -S --noconfirm \
     github-cli \
     git \
     vim \
-    tk \
-    zlib \
-    openssl \
-    readline \
-    sqlite \
-    curl \
-    llvm \
-    ncurses \
-    xz \
-    libffi \
-    libyaml
+    semgrep \
+    bandit
 
 # Install Rust
 sudo pacman -S --needed --noconfirm rustup
 rustup default stable
 
-# Install paru (AUR helper) more securely
+# Install paru (AUR helper) securely
 if ! command -v paru >/dev/null 2>&1; then
     log "Installing paru AUR helper..."
     cd /tmp
@@ -413,80 +414,44 @@ if ! command -v paru >/dev/null 2>&1; then
     rm -rf /tmp/paru
 fi
 
-# Install VSCodium (telemetry-free VS Code)
+# Install VSCodium after paru is available
 paru -S --noconfirm vscodium-bin
 
-# Create development directories
+# Create secure development directories
 mkdir -p $HOME/{Projects,AI,Scripts}
+chmod 750 $HOME/{Projects,AI,Scripts}
 
 # Configure Git
 git config --global init.defaultBranch main
 git config --global pull.rebase true
 git config --global core.editor vim
 
-# Use system Python 3.11 from Arch repos (simpler and more reliable)
-log "Installing Python 3.11 for ML/AI development..."
-sudo pacman -S --noconfirm python python-pip python-virtualenv
-
-# Create virtual environment with system Python
-log "Creating Python virtual environment..."
-python -m venv $HOME/.local/share/dev-env
-
-# Verify Python version
-source $HOME/.local/share/dev-env/bin/activate
-python_version=$(python --version 2>&1)
-log "Using Python: $python_version"
-
-# Create Python development environment with compatible versions
-log "Creating development environment with ML/AI packages..."
-python -m venv $HOME/.local/share/dev-env
+# Create lightweight development environment using system packages
+log "Creating optimized Python environment..."
+python -m venv --system-site-packages $HOME/.local/share/dev-env
 source $HOME/.local/share/dev-env/bin/activate
 
-# Upgrade pip first
-pip install --upgrade pip setuptools wheel
-
-# Install packages in order of dependency complexity
-log "Installing core Python packages..."
-pip install numpy scipy
-
-log "Installing data science packages..."
-pip install pandas matplotlib seaborn plotly ipython jupyter
-
-log "Installing ML/AI packages..."
-pip install scikit-learn
-
-log "Installing PyTorch (CPU version for compatibility)..."
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-
-log "Installing TensorFlow..."
-# Install TensorFlow from Arch repos for better compatibility
-deactivate 2>/dev/null || true
-sudo pacman -S --noconfirm python-tensorflow python-keras
-source $HOME/.local/share/dev-env/bin/activate
-
-log "Installing additional development tools..."
-pip install black flake8 pylint pytest mypy
+# Install only additional development tools
+pip install --no-deps black flake8 pylint pytest mypy
 
 # Create activation script
 tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
 
 
 #!/bin/bash
-
-# Activate development environment
-
 source $HOME/.local/share/dev-env/bin/activate
-echo "🐍 Development environment activated!"
-echo "Python: $(python --version)"
-echo "Packages: $(pip list | wc -l) installed"
+echo "🐍 Development environment activated (System Python + extras)"
+echo "Python: $(python –version)"
+echo "PyTorch: $(python -c 'import torch; print(torch.**version**)' 2>/dev/null || echo 'Not available')"
+echo "TensorFlow: $(python -c 'import tensorflow; print(tensorflow.**version**)' 2>/dev/null || echo 'Not available')"
 EOF
-
 
 chmod +x $HOME/.local/bin/dev-activate
 
-log "✅ Development environment configured with Python 3.11"
-info "Use 'dev-activate' or 'source ~/.local/share/dev-env/bin/activate' to activate"
+deactivate
 
+log "✅ Development environment configured with optimized Python stack"
+info "Use 'dev-activate' to activate development environment"
 
 }
 
