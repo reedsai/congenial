@@ -372,8 +372,8 @@ log "✅ Firefox isolation configured"
 # Setup development environment with proper Python version management
 
 setup_development() {
-log "💻 Setting up development environment…"
-export PATH="$HOME/.local/bin:$PATH"
+log “💻 Setting up development environment…”
+export PATH=”$HOME/.local/bin:$PATH”
 
 
 # Install development tools and optimized Python stack
@@ -386,7 +386,7 @@ sudo pacman -S --noconfirm \
     python-scikit-learn \
     python-pytorch-cuda \
     python-tensorflow-cuda \
-    python-jupyter \
+    jupyter-notebook \
     python-pip \
     python-virtualenv \
     nodejs \
@@ -430,7 +430,7 @@ python -m venv --system-site-packages $HOME/.local/share/dev-env
 source $HOME/.local/share/dev-env/bin/activate
 
 # Install only additional development tools
-pip install --no-deps black flake8 pylint pytest mypy
+pip install --no-deps black flake8 pylint pytest mypy semgrep bandit
 
 # Create activation script
 tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
@@ -438,11 +438,12 @@ tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
 
 #!/bin/bash
 source $HOME/.local/share/dev-env/bin/activate
-echo "🐍 Development environment activated (System Python + extras)"
-echo "Python: $(python –version)"
-echo "PyTorch: $(python -c 'import torch; print(torch.**version**)' 2>/dev/null || echo 'Not available')"
-echo "TensorFlow: $(python -c 'import tensorflow; print(tensorflow.**version**)' 2>/dev/null || echo 'Not available')"
+echo “🐍 Development environment activated (System Python + extras)”
+echo “Python: $(python –version)”
+echo “PyTorch: $(python -c ‘import torch; print(torch.**version**)’ 2>/dev/null || echo ‘Not available’)”
+echo “TensorFlow: $(python -c ‘import tensorflow; print(tensorflow.**version**)’ 2>/dev/null || echo ‘Not available’)”
 EOF
+
 
 chmod +x $HOME/.local/bin/dev-activate
 
@@ -450,6 +451,7 @@ deactivate
 
 log "✅ Development environment configured with optimized Python stack"
 info "Use 'dev-activate' to activate development environment"
+
 
 }
 
