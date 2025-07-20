@@ -586,6 +586,14 @@ setup_fortress_dns() {
     # This script is tailored for Arch Linux.
     sudo pacman -S --needed --noconfirm unbound dnscrypt-proxy irqbalance
 
+# --- VERIFY INSTALLATION ---
+if ! id "dnscrypt-proxy" &>/dev/null; then
+    error "The 'dnscrypt-proxy' user was not created. The package installation failed."
+    error "Check your internet connection and pacman logs (/var/log/pacman.log)."
+    error "Run 'sudo pacman -S dnscrypt-proxy' manually to see the specific error."
+    exit 1
+fi
+
     # --- CONFIGURATION: DNSCrypt-Proxy (The Armored Transport) ---
     log "Configuring dnscrypt-proxy for Oblivious DoH transport..."
 
