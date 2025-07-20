@@ -582,13 +582,13 @@ setup_fortress_dns() {
 
     # --- INSTALLATION ---
     log "Installing Unbound and DNSCrypt-Proxy..."
+
+sudo mkdir -p /etc/dnscrypt-proxy
     # This script is tailored for Arch Linux.
     sudo pacman -S --needed --noconfirm unbound dnscrypt-proxy irqbalance
 
     # --- CONFIGURATION: DNSCrypt-Proxy (The Armored Transport) ---
     log "Configuring dnscrypt-proxy for Oblivious DoH transport..."
-
-sudo mkdir -p /etc/dnscrypt-proxy/
 
     sudo tee /etc/dnscrypt-proxy/dnscrypt-proxy.toml > /dev/null << 'EOF'
 # This instance is ONLY for Unbound's recursive lookups.
