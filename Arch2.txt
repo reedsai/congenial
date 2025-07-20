@@ -395,8 +395,7 @@ sudo pacman -S --noconfirm \
     podman-compose \
     github-cli \
     git \
-    vim \
-    bandit
+    vim
 
 # Install Rust
 sudo pacman -S --needed --noconfirm rustup
