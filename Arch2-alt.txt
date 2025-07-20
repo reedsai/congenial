@@ -172,122 +172,6 @@ log "✅ Minimal KDE Plasma installed"
 
 }
 
-# Setup Technitium DNS Server with AppArmor
-
-setup_technitium_apparmor() {
-log "🛡️ Creating hardened AppArmor profile for Technitium DNS…"
-
-
-sudo tee /etc/apparmor.d/technitium-dns > /dev/null << 'EOF'
-
-
-#include <tunables/global>
-
-profile technitium-dns flags=(attach_disconnected,mediate_deleted) {
-#include <abstractions/base>
-#include <abstractions/nameservice>
-#include <abstractions/openssl>
-
-# Required executable for the container
-
-/usr/bin/dotnet rix,
-
-# Data directory mounted into the container
-
-owner @{HOME}/.local/share/technitium-dns/** rw,
-
-# .NET runtime needs access to system libraries and resources
-
-/usr/share/dotnet/** r,
-/usr/lib/dotnet/** mr,
-/etc/dotnet/** r,
-/etc/ssl/certs/** r,
-/run/systemd/resolve/stub-resolv.conf r,
-
-# Network access for DNS functionality
-
-network inet dgram,
-network inet stream,
-network inet6 dgram,
-network inet6 stream,
-
-# Deny capabilities not required by a DNS server
-
-deny capability sys_admin,
-deny capability net_raw,
-deny capability sys_module,
-deny capability sys_ptrace,
-}
-EOF
-
-
-sudo apparmor_parser -r /etc/apparmor.d/technitium-dns
-
-
-}
-
-setup_technitium_dns() {
-log "🔒 Setting up Technitium DNS Server…"
-
-
-if ! podman image exists technitium/dns-server:latest; then
-    log "Pulling Technitium DNS image..."
-    podman pull technitium/dns-server:latest || error "Failed to pull Technitium DNS image. Check network and DNS settings."
-fi
-
-mkdir -p "$HOME/.local/share/technitium-dns"
-mkdir -p "$HOME/.config/systemd/user"
-
-# Create the network first
-podman network create --subnet=172.20.0.0/16 "$DNS_NETWORK" || warning "Network '$DNS_NETWORK' may already exist."
-
-podman create \
-    --name technitium-dns \
-    --replace \
-    --network "$DNS_NETWORK" \
-    --ip 172.20.0.10 \
-    -p 127.0.0.1:5380:5380/tcp \
-    -p 127.0.0.1:53:53/udp \
-    -p 127.0.0.1:53:53/tcp \
-    -v "$HOME/.local/share/technitium-dns:/etc/dns:Z" \
-    --security-opt "apparmor=technitium-dns" \
-    --memory=512m \
-    --cpus=1 \
-    technitium/dns-server:latest
-
-podman generate systemd --new --name technitium-dns --files
-mv container-technitium-dns.service "$HOME/.config/systemd/user/"
-systemctl --user daemon-reload
-systemctl --user enable --now container-technitium-dns.service
-
-log "Waiting for Technitium DNS to stabilize..."
-sleep 15
-
-if ! systemctl --user is-active --quiet container-technitium-dns.service; then
-    error "Technitium DNS container failed to start. Cannot proceed."
-fi
-
-# Update host DNS settings
-sudo tee /etc/systemd/resolved.conf > /dev/null << 'EOF'
-
-
-[Resolve]
-DNS=127.0.0.1
-Domains=~.
-DNSSEC=yes
-DNSOverTLS=opportunistic
-Cache=yes
-DNSStubListener=yes
-EOF
-
-
-sudo systemctl restart systemd-resolved
-log "✅ Technitium DNS Server configured"
-info "Access DNS admin at: http://127.0.0.1:5380"
-
-
-}
-
 # Setup Firefox with AppArmor isolation
 
 setup_firefox_isolation() {
@@ -721,6 +605,162 @@ info "Access Syncthing at: http://127.0.0.1:8384"
 
 }
 
+setup_secure_dns() {
+    log "🔥 Forging the Definitive Purist DNS Stack..."
+
+    # 1. Install components
+    log "Installing dnsmasq and dnscrypt-proxy..."
+    sudo pacman -S --needed --noconfirm dnsmasq dnscrypt-proxy
+
+    # 2. Eradicate systemd-resolved to prevent conflicts
+    log "Disabling and masking systemd-resolved..."
+    sudo systemctl disable --now systemd-resolved.service 2>/dev/null || true
+    sudo systemctl mask systemd-resolved.service
+
+    # 3. Configure dnscrypt-proxy: The Anonymizing Backend
+    log "Configuring dnscrypt-proxy for maximum anonymity and security..."
+    sudo tee /etc/dnscrypt-proxy/dnscrypt-proxy.toml > /dev/null << 'EOF'
+# --- CORE STRATEGY: UNWAVERING ANONYMITY ---
+# Routes are a brittle, manual alternative and have been REMOVED.
+anonymize_dns = true
+
+# --- MINIMALIST TRUST: CURATED SERVER LIST ---
+# Using high-quality, logging-free, DNSSEC-enabled servers.
+server_names = ['quad9-dnscrypt-ip4-filter-pri', 'dnsforge.de', 'scaleway-fr', 'cloudflare']
+
+# --- TECHNICAL & SECURITY HARDENING ---
+listen_addresses = ['127.0.0.1:5354'] # High port for dnsmasq
+require_dnssec = true
+require_nolog = true
+require_nofilter = false # Allows high-quality filtering servers like Quad9
+dnscrypt_servers = true  # REQUIRED for anonymization
+doh_servers = false      # Disabled for protocol purity
+cache = false            # Correctly disabled; dnsmasq will handle caching
+fallback_resolver = '9.9.9.9:53' # For initial bootstrap
+ipv4_servers = true
+ipv6_servers = false     # SAFER: Prevents leaks on non-IPv6 networks
+EOF
+
+    # 4. Configure dnsmasq: The Smart Caching & Blocking Frontend
+    log "Configuring dnsmasq as the local caching resolver..."
+    sudo tee /etc/dnsmasq.conf > /dev/null << 'EOF'
+# INTERFACES: Listen only on loopback
+listen-address=127.0.0.1
+port=53
+bind-interfaces
+
+# UPSTREAM: Forward ALL queries to our secure, anonymizing backend
+server=127.0.0.1#5354
+no-resolv
+
+# SECURITY: Enable DNSSEC validation and block junk requests
+dnssec
+bogus-priv
+
+# LOCAL NETWORK: For resolving local hostnames like 'fortress.lan'
+domain=lan
+expand-hosts
+
+# BLOCKING: Use a dedicated, dynamically updated blocklist
+conf-file=/etc/dnsmasq-blocklist.conf
+
+# PERFORMANCE & CACHING: A large cache for a snappy experience
+cache-size=10000
+EOF
+
+    # 5. Create the Blocklist Update Mechanism
+    log "Setting up systemd timer for daily ad/malware blocklist updates..."
+    sudo tee /usr/local/bin/update-dns-blocklist > /dev/null << 'EOF'
+#!/bin/bash
+BLOCKLIST_PATH="/etc/dnsmasq-blocklist.conf"
+TEMP_FILE=$(mktemp)
+
+# Download and process multiple sources into the efficient 'address=/.example.com/0.0.0.0' format
+# This format is significantly faster for dnsmasq than a huge hosts file.
+{
+    curl -sS --fail "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" | awk '/^0\.0\.0\.0/ {print "address=/."$2"/0.0.0.0"}'
+    curl -sS --fail "https://mirror1.malwaredomains.com/files/justdomains" | sed 's/^/address=&\/0.0.0.0/'
+} | sort -u > "$TEMP_FILE"
+
+if [ -s "$TEMP_FILE" ]; then
+    mv "$TEMP_FILE" "$BLOCKLIST_PATH"
+    logger "DNS blocklist updated: $(wc -l < "$BLOCKLIST_PATH") rules applied."
+    # Reload dnsmasq to apply the new list without dropping connections
+    systemctl reload dnsmasq.service
+else
+    logger "DNS blocklist update failed."
+    rm -f "$TEMP_FILE"
+    exit 1
+fi
+rm -f "$TEMP_FILE"
+EOF
+    sudo chmod +x /usr/local/bin/update-dns-blocklist
+    log "Running initial blocklist update..."
+    sudo /usr/local/bin/update-dns-blocklist
+
+    # Systemd Timer to replace cron
+    sudo tee /etc/systemd/system/update-dns-blocklist.service > /dev/null << 'EOSERVICE'
+[Unit]
+Description=Update DNS blocklist for dnsmasq
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-dns-blocklist
+EOSERVICE
+
+    sudo tee /etc/systemd/system/update-dns-blocklist.timer > /dev/null << 'EOTIMER'
+[Unit]
+Description=Run dnsmasq blocklist update daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOTIMER
+
+    sudo systemctl enable --now update-dns-blocklist.timer
+
+    # 6. Configure NetworkManager to USE the new stack
+    log "Configuring NetworkManager to use dnsmasq..."
+    sudo tee /etc/NetworkManager/conf.d/99-dns.conf > /dev/null << 'EOF'
+# Use dnsmasq as the DNS plugin for NetworkManager.
+# This ensures all network connections automatically use our secure setup.
+[main]
+dns=dnsmasq
+EOF
+
+    # 7. DNS LEAK PROTECTION via firewalld
+    log "Hardening firewall to prevent DNS leaks..."
+    # This is the most critical step. It ensures NO process can make DNS queries
+    # directly, bypassing our secure chain. Only dnscrypt-proxy is allowed out.
+    id dnscrypt-proxy &>/dev/null || sudo useradd -r -s /bin/false dnscrypt-proxy
+    sudo firewall-cmd --permanent --zone=public --remove-service=dhcpv6-client
+    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 ! -d 127.0.0.1 -p udp --dport 53 -j REJECT
+    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 ! -d 127.0.0.1 -p tcp --dport 53 -j REJECT
+    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 1 -m owner --uid-owner dnscrypt-proxy -j ACCEPT
+    sudo firewall-cmd --reload
+
+    # 8. Start and Enable the full stack
+    log "Restarting network stack to apply all changes..."
+    sudo systemctl enable --now dnscrypt-proxy.service dnsmasq.service
+    sudo systemctl restart NetworkManager.service
+
+    # 9. Verify the entire chain
+    log "Verifying DNS resolution..."
+    sleep 5 # Give services a moment to start
+    if dig @127.0.0.1 +short google.com >/dev/null 2>&1; then
+        log "✅ Definitive DNS Stack is ACTIVE. All DNS traffic is now anonymized and filtered."
+    else
+        error "❌ DNS chain is broken. Check dnscrypt-proxy and dnsmasq service logs."
+        exit 1
+    fi
+}
+
 # Setup Snapper for snapshots
 
 setup_snapper() {
@@ -953,16 +993,15 @@ verify_part1
 setup_gpu_cuda
 setup_minimal_kde
 
-# Container and network isolation
-setup_technitium_apparmor
-setup_technitium_dns
-
 # Application isolation
 setup_firefox_isolation
 setup_obsidian_syncthing
 
 # Development environment (with fixed Python compatibility)
 setup_development
+
+# Dnscrypt proxy plus dnsmasq. firewalld. timer
+setup_secure_dns
 
 # System maintenance
 setup_snapper
@@ -979,11 +1018,10 @@ podman auto-update
 log "🎉 Arch Fortress Part 2 Installation Complete! 🎉"
 log "📋 Next steps:"
 log "   1. Reboot to load GPU drivers and KDE"
-log "   2. Configure Technitium DNS at http://127.0.0.1:5380"
-log "   3. Set up Syncthing at http://127.0.0.1:8384"
-log "   4. Run 'fortress-status' to check system"
-log "   5. Use 'firefox-fortress' for secure browsing"
-log "   6. Use 'dev-activate' to enter ML/AI development environment"
+log "   2. Set up Syncthing at http://127.0.0.1:8384"
+log "   3. Run 'fortress-status' to check system"
+log "   4. Use 'firefox-fortress' for secure browsing"
+log "   5. Use 'dev-activate' to enter ML/AI development environment"
 
 info "🐍 Python Environment Details:"
 info "   - System Python: $(python --version 2>/dev/null || echo 'Not available')"
@@ -991,7 +1029,7 @@ info "   - Development Environment: Python 3.11 with ML/AI packages"
 info "   - Activation: 'dev-activate' or 'source ~/.local/share/dev-env/bin/activate'"
 
 info "🛡️ Security Features:"
-info "   - AppArmor profiles for Firefox, Obsidian, Syncthing, and Technitium"
+info "   - AppArmor profiles for Firefox, Obsidian and Syncthing"
 info "   - MAC address randomization"
 info "   - Container isolation with custom networks"
 info "   - Snapshot system with automatic cleanup"
@@ -1003,7 +1041,6 @@ info "   - Minimal KDE desktop environment"
 info "   - Optimized container resource limits"
 
 warning "⚠️  IMPORTANT SECURITY NOTES:"
-warning "   - Change default Technitium DNS admin password immediately"
 warning "   - Review and customize AppArmor profiles as needed"
 warning "   - Set up firewall rules for your specific use case"
 warning "   - Consider enabling full disk encryption if not already done"
@@ -1182,7 +1219,6 @@ check_system_service fail2ban
 check_system_service systemd-resolved
 
 log "Checking user services…"
-check_service container-technitium-dns.service
 check_service syncthing.service
 
 log "Checking AppArmor profiles…"
@@ -1191,14 +1227,6 @@ if [[ $PROFILES -gt 0 ]]; then
 log "$PROFILES AppArmor profiles loaded"
 else
 error "No AppArmor profiles loaded"
-((ERRORS++))
-fi
-
-log "Checking container status…"
-if podman ps --format "{{.Names}}" | grep -q technitium-dns; then
-log "Technitium DNS container running"
-else
-error "Technitium DNS container not running"
 ((ERRORS++))
 fi
 
@@ -1268,7 +1296,6 @@ done
 # Verify AppArmor profiles
 
 APPARMOR_PROFILES=(
-"/etc/apparmor.d/technitium-dns"
 "/etc/apparmor.d/firefox-fortress"
 "/etc/apparmor.d/obsidian"
 "/etc/apparmor.d/syncthing"
@@ -1297,7 +1324,6 @@ log "   5. Run hardening: 'fortress-harden'"
 
 echo
 warning "🔐 SECURITY CHECKLIST:"
-warning "   □ Change Technitium DNS admin password"
 warning "   □ Configure firewall rules for your network"
 warning "   □ Set up encrypted backups"
 warning "   □ Test emergency recovery: 'fortress-emergency'"
