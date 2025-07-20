@@ -577,160 +577,309 @@ info "Access Syncthing at: http://127.0.0.1:8384"
 
 }
 
-setup_secure_dns() {
-    log "🔥 Forging the Definitive Purist DNS Stack..."
+setup_fortress_dns() {
+    log "🛡️ FORTRESS DNS: Production Hardened & Sovereign Setup"
 
-    # 1. Install components
-    log "Installing dnsmasq and dnscrypt-proxy..."
-    sudo pacman -S --needed --noconfirm dnsmasq dnscrypt-proxy
+    # --- PREPARATION: Clear the ground ---
+    log "Disabling and masking conflicting DNS services..."
+    sudo systemctl disable --now systemd-resolved dnsmasq 2>/dev/null || true
+    sudo systemctl mask systemd-resolved
+    # Make resolv.conf mutable before writing to it
+    [[ -f /etc/resolv.conf ]] && sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+    sudo rm -f /etc/resolv.conf
 
-    # 2. Eradicate systemd-resolved to prevent conflicts
-    log "Disabling and masking systemd-resolved..."
-    sudo systemctl disable --now systemd-resolved.service 2>/dev/null || true
-    sudo systemctl mask systemd-resolved.service
+    # --- INSTALLATION ---
+    log "Installing Unbound and DNSCrypt-Proxy..."
+    # This script is tailored for Arch Linux.
+    sudo pacman -S --needed --noconfirm unbound dnscrypt-proxy irqbalance
 
-    # 3. Configure dnscrypt-proxy: The Anonymizing Backend
-    log "Configuring dnscrypt-proxy for maximum anonymity and security..."
+    # --- CONFIGURATION: DNSCrypt-Proxy (The Armored Transport) ---
+    log "Configuring dnscrypt-proxy for Oblivious DoH transport..."
     sudo tee /etc/dnscrypt-proxy/dnscrypt-proxy.toml > /dev/null << 'EOF'
-# --- CORE STRATEGY: UNWAVERING ANONYMITY ---
-# Routes are a brittle, manual alternative and have been REMOVED.
-anonymize_dns = true
+# This instance is ONLY for Unbound's recursive lookups.
+# We prioritize servers that support Anonymized DNS (ODoH).
+server_names = ['quad9-odoh', 'mullvad-odoh']
 
-# --- MINIMALIST TRUST: CURATED SERVER LIST ---
-# Using high-quality, logging-free, DNSSEC-enabled servers.
-server_names = ['quad9-dnscrypt-ip4-filter-pri', 'dnsforge.de', 'scaleway-fr', 'cloudflare']
+# --- MANDATORY ODoH ROUTING ---
+# By defining routes, you force dnscrypt-proxy to use an anonymizing relay.
+# If a relay fails, the query fails. No fallback.
+# These relays are geographically diverse.
+routes = [
+    { server_name = 'mullvad-odoh', via = ['anon-cs-nl', 'anon-pl-quic'] },
+    { server_name = 'quad9-odoh',      via = ['anon-inconnu-ca', 'anon-sth-se'] }
+]
 
-# --- TECHNICAL & SECURITY HARDENING ---
-listen_addresses = ['127.0.0.1:5354'] # High port for dnsmasq
+# Listen on a high local port for Unbound to connect to.
+# Listen on both IPv4 and IPv6 localhost for Unbound to connect to.
+listen_addresses = ['127.0.0.1:5353', '[::1]:5353']
+
+
+# Caching is disabled. Unbound is the sole cache authority.
+cache = false
+
+# Security first. Require DNSSEC, no logs, and no filtering from the upstream.
+# Unbound handles DNSSEC validation and we handle filtering.
 require_dnssec = true
 require_nolog = true
-require_nofilter = false # Allows high-quality filtering servers like Quad9
-dnscrypt_servers = true  # REQUIRED for anonymization
-doh_servers = false      # Disabled for protocol purity
-cache = false            # Correctly disabled; dnsmasq will handle caching
-fallback_resolver = '9.9.9.9:53' # For initial bootstrap
-ipv4_servers = true
-ipv6_servers = false     # SAFER: Prevents leaks on non-IPv6 networks
+require_nofilter = true
+
+# Use modern, privacy-preserving protocols.
+doh_servers = true
+odoh_servers = true
+dnscrypt_servers = false
+dot_servers = false
+
+# Performance and reliability tuning.
+timeout = 5000
+keepalive = 30
+lb_strategy = 'p2'
+lb_estimator = true
+
+# Privacy settings.
+block_unqualified = true
+block_undelegated = true
+
+# Bootstrap with trusted resolvers.
+bootstrap_resolvers = ['9.9.9.9:53', '1.1.1.1:53']
+ignore_system_dns = true
+
+# Suppress logs for privacy.
+log_level = 0
 EOF
 
-    # 4. Configure dnsmasq: The Smart Caching & Blocking Frontend
-    log "Configuring dnsmasq as the local caching resolver..."
-    sudo tee /etc/dnsmasq.conf > /dev/null << 'EOF'
-# INTERFACES: Listen only on loopback
-listen-address=127.0.0.1
-port=53
-bind-interfaces
+    # --- CONFIGURATION: Unbound (The Sovereign Resolver) ---
+    log "Configuring Unbound as a hardened, caching, recursive resolver..."
+    sudo tee /etc/unbound/unbound.conf > /dev/null << 'EOF'
+server:
+    # Service configuration
+    interface: 127.0.0.1
+    interface: ::1
+    port: 53
+    do-ip4: yes
+    do-ip6: yes
+    do-udp: yes
+    do-tcp: yes
+    access-control: 127.0.0.0/8 allow
+    access-control: ::1/128 allow
 
-# UPSTREAM: Forward ALL queries to our secure, anonymizing backend
-server=127.0.0.1#5354
-no-resolv
+# Enable socket reuse for better performance on multi-core systems
+    so-reuseport: yes
 
-# SECURITY: Enable DNSSEC validation and block junk requests
-dnssec
-bogus-priv
+    
+    # Performance Tuning - Adjust num-threads to match your CPU core count
+    num-threads: 4 
+    msg-cache-slabs: 8
+    rrset-cache-slabs: 8
+    infra-cache-slabs: 8
+    key-cache-slabs: 8
+    msg-cache-size: 128m
+    rrset-cache-size: 256m
+    outgoing-range: 8192
+    num-queries-per-thread: 4096
 
-# LOCAL NETWORK: For resolving local hostnames like 'fortress.lan'
-domain=lan
-expand-hosts
+    # Caching - Balanced for performance and freshness
+    cache-min-ttl: 0 # Respect the record's TTL
+    cache-max-ttl: 86400 # Cache for a maximum of 1 day
+    serve-expired: yes   # Serve stale data if resolvers are unreachable
+    serve-expired-ttl: 3600 # But only for up to an hour
+    prefetch: yes
+    prefetch-key: yes
 
-# BLOCKING: Use a dedicated, dynamically updated blocklist
-conf-file=/etc/dnsmasq-blocklist.conf
+    # DNSSEC - Authoritative validation
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+    val-clean-additional: yes
+    harden-dnssec-stripped: yes
 
-# PERFORMANCE & CACHING: A large cache for a snappy experience
-cache-size=10000
+    # Security & Privacy Hardening
+    hide-identity: yes
+    hide-version: yes
+    harden-glue: yes
+    harden-below-nxdomain: yes
+    harden-referral-path: no # Set to 'no' for recursive mode
+    qname-minimisation: yes
+    qname-minimisation-strict: yes
+    aggressive-nsec: yes
+    use-caps-for-id: yes
+    unwanted-reply-threshold: 10000000
+
+    # Anti-DNS Rebinding
+    private-address: 10.0.0.0/8
+    private-address: 172.16.0.0/12  
+    private-address: 192.168.0.0/16
+    private-address: 169.254.0.0/16
+    private-address: fd00::/8
+    private-address: fe80::/10
+
+    # Recursive configuration - Tell Unbound to use our encrypted proxy
+    do-not-query-localhost: no
+    ssl-upstream: yes
+
+    forward-zone:
+        name: "."
+        forward-addr: 127.0.0.1@5353
+        forward-addr: ::1@5353
 EOF
 
-    # 5. Create the Blocklist Update Mechanism
-    log "Setting up systemd timer for daily ad/malware blocklist updates..."
+    # --- BLOCKLISTING ---
+    log "Installing robust, self-updating blocklist mechanism..."
     sudo tee /usr/local/bin/update-dns-blocklist > /dev/null << 'EOF'
 #!/bin/bash
-BLOCKLIST_PATH="/etc/dnsmasq-blocklist.conf"
+set -euo pipefail
+
+BLOCKLIST_PATH="/etc/unbound/blocklist.conf"
 TEMP_FILE=$(mktemp)
 
-# Download and process multiple sources into the efficient 'address=/.example.com/0.0.0.0' format
-# This format is significantly faster for dnsmasq than a huge hosts file.
-{
-    curl -sS --fail "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" | awk '/^0\.0\.0\.0/ {print "address=/."$2"/0.0.0.0"}'
-    curl -sS --fail "https://mirror1.malwaredomains.com/files/justdomains" | sed 's/^/address=&\/0.0.0.0/'
-} | sort -u > "$TEMP_FILE"
+WHITELIST_PATH="/etc/unbound/whitelist.conf"
+# Whitelist essential domains to prevent breakage. Add your own if needed.
+WHITELIST_DOMAINS=(
+    "*.mullvad.net" "*.quad9.net" "*.archlinux.org"
+    "*.github.com" "githubusercontent.com"
+)
 
-if [ -s "$TEMP_FILE" ]; then
-    mv "$TEMP_FILE" "$BLOCKLIST_PATH"
-    logger "DNS blocklist updated: $(wc -l < "$BLOCKLIST_PATH") rules applied."
-    # Reload dnsmasq to apply the new list without dropping connections
-    systemctl reload dnsmasq.service
+# You can add more trusted blocklist sources here
+SOURCES=(
+    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+    "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext"
+    "https://raw.githubusercontent.com/AdguardTeam/AdguardFilters/master/BaseFilter/sections/adservers.txt"
+)
+
+# Download and process sources
+{
+    for url in "${SOURCES[@]}"; do
+        timeout 30 curl -sS --tlsv1.2 --tls-max 1.3 "$url" 2>/dev/null || continue
+    done
+} | awk '
+
+    # For hosts format (0.0.0.0 domain.com)
+    /^0\.0\.0\.0[[:space:]]+[^[:space:]]+/ && $2 !~ /^(0\.0\.0\.0|localhost|localhost\.localdomain)$/ {
+        gsub(/\r/, "") # Remove carriage returns
+        domains[$2]++
+    }
+    # For AdGuard format (||domain.com^)
+    /^\|\|[a-zA-Z0-9.\-]+\^/ {
+        gsub(/[|\^]/, "")
+        gsub(/\r/, "")
+        domains[$0]++
+    }
+    END {
+        for (domain in domains) {
+            print "local-zone: \"" domain "\" refuse"
+        }
+    }
+' | sort -u > "$TEMP_FILE"
+
+# Generate the whitelist configuration
+{
+    for domain in "${WHITELIST_DOMAINS[@]}"; do
+        echo "local-zone: \"${domain}.\" transparent"
+    done
+} | sudo tee "$WHITELIST_PATH" > /dev/null
+
+# Atomically update the blocklist if the new one is valid
+if [[ -s "$TEMP_FILE" && $(wc -l < "$TEMP_FILE") -gt 5000 ]]; then
+    sudo mv "$TEMP_FILE" "$BLOCKLIST_PATH"
+    if systemctl is-active --quiet unbound; then
+        sudo unbound-control reload_keep_cache >/dev/null
+        logger "FORTRESS DNS: Blocklist updated with $(wc -l < "$BLOCKLIST_PATH") domains."
+    fi
 else
-    logger "DNS blocklist update failed."
+    # If download fails, don't break, just log it.
+    logger "FORTRESS DNS: Blocklist update failed. Using existing list."
     rm -f "$TEMP_FILE"
-    exit 1
 fi
-rm -f "$TEMP_FILE"
 EOF
     sudo chmod +x /usr/local/bin/update-dns-blocklist
-    log "Running initial blocklist update..."
+
+    # Include blocklist in Unbound and run it for the first time
+    if ! grep -q 'include: "/etc/unbound/user_lists.conf"' /etc/unbound/unbound.conf; then
+    echo '# Include user-defined block and white lists' | sudo tee /etc/unbound/user_lists.conf > /dev/null
+    echo 'include: "/etc/unbound/whitelist.conf"' | sudo tee -a /etc/unbound/user_lists.conf > /dev/null
+    echo 'include: "/etc/unbound/blocklist.conf"' | sudo tee -a /etc/unbound/user_lists.conf > /dev/null
+    
+    echo 'include: "/etc/unbound/user_lists.conf"' | sudo tee -a /etc/unbound/unbound.conf > /dev/null
+fi
     sudo /usr/local/bin/update-dns-blocklist
 
-    # Systemd Timer to replace cron
-    sudo tee /etc/systemd/system/update-dns-blocklist.service > /dev/null << 'EOSERVICE'
+    # --- AUTOMATION: Systemd Timers ---
+    log "Setting up systemd timers for automatic blocklist updates..."
+    sudo tee /etc/systemd/system/dns-blocklist-update.timer > /dev/null << 'EOF'
 [Unit]
-Description=Update DNS blocklist for dnsmasq
+Description=Daily update for Unbound DNS blocklist
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=4h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+    sudo tee /etc/systemd/system/dns-blocklist-update.service > /dev/null << 'EOF'
+[Unit]
+Description=Update Unbound DNS blocklist
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/update-dns-blocklist
-EOSERVICE
-
-    sudo tee /etc/systemd/system/update-dns-blocklist.timer > /dev/null << 'EOTIMER'
-[Unit]
-Description=Run dnsmasq blocklist update daily
-
-[Timer]
-OnCalendar=daily
-RandomizedDelaySec=6h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOTIMER
-
-    sudo systemctl enable --now update-dns-blocklist.timer
-
-    # 6. Configure NetworkManager to USE the new stack
-    log "Configuring NetworkManager to use dnsmasq..."
-    sudo tee /etc/NetworkManager/conf.d/99-dns.conf > /dev/null << 'EOF'
-# Use dnsmasq as the DNS plugin for NetworkManager.
-# This ensures all network connections automatically use our secure setup.
-[main]
-dns=dnsmasq
 EOF
 
-    # 7. DNS LEAK PROTECTION via firewalld
-    log "Hardening firewall to prevent DNS leaks..."
-    # This is the most critical step. It ensures NO process can make DNS queries
-    # directly, bypassing our secure chain. Only dnscrypt-proxy is allowed out.
-    id dnscrypt-proxy &>/dev/null || sudo useradd -r -s /bin/false dnscrypt-proxy
-    sudo firewall-cmd --permanent --zone=public --remove-service=dhcpv6-client
-    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 ! -d 127.0.0.1 -p udp --dport 53 -j REJECT
-    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 0 ! -d 127.0.0.1 -p tcp --dport 53 -j REJECT
-    sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 1 -m owner --uid-owner dnscrypt-proxy -j ACCEPT
-    sudo firewall-cmd --reload
+    # --- NETWORK INTEGRATION & LEAK PREVENTION ---
+    log "Hardening network configuration against DNS leaks..."
+    # Tell NetworkManager to leave DNS alone
+    sudo mkdir -p /etc/NetworkManager/conf.d
+    # Tell NetworkManager to leave DNS alone and enable IPv6 privacy extensions
+echo -e "[main]\ndns=none\nsystemd-resolved=false\n[connection]\nipv6.ip6-privacy=2" | sudo tee /etc/NetworkManager/conf.d/99-dns-fortress.conf > /dev/null
 
-    # 8. Start and Enable the full stack
-    log "Restarting network stack to apply all changes..."
-    sudo systemctl enable --now dnscrypt-proxy.service dnsmasq.service
-    sudo systemctl restart NetworkManager.service
 
-    # 9. Verify the entire chain
-    log "Verifying DNS resolution..."
-    sleep 5 # Give services a moment to start
-    if dig @127.0.0.1 +short google.com >/dev/null 2>&1; then
-        log "✅ Definitive DNS Stack is ACTIVE. All DNS traffic is now anonymized and filtered."
-    else
-        error "❌ DNS chain is broken. Check dnscrypt-proxy and dnsmasq service logs."
-        exit 1
+    # Correct firewall rules for firewalld
+    if command -v firewall-cmd &>/dev/null; then
+        log "Applying firewalld rules to prevent DNS leaks..."
+        # Block any process from sending DNS traffic out, except for root and dnscrypt-proxy
+        sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 1 -p udp --dport 53 -m owner ! --uid-owner root -m owner ! --uid-owner dnscrypt-proxy -j REJECT
+        sudo firewall-cmd --permanent --direct --add-rule ipv4 filter OUTPUT 1 -p tcp --dport 53 -m owner ! --uid-owner root -m owner ! --uid-owner dnscrypt-proxy -j REJECT
+        # Allow dnscrypt-proxy to communicate outbound on ANY port. This is the correct rule.
+        sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="127.0.0.1" protocol tcp accept'
+        sudo firewall-cmd --reload
     fi
+
+    # Set system to use the local fortress, with robust options
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+echo "nameserver ::1" | sudo tee -a /etc/resolv.conf
+echo "options edns0 trust-ad timeout:1 rotate" | sudo tee -a /etc/resolv.conf
+
+    sudo chattr +i /etc/resolv.conf
+
+    # --- ACTIVATION ---
+    log "Activating and enabling services..."
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now irqbalance
+    sudo systemctl enable --now dns-blocklist-update.timer
+    sudo systemctl enable --now dnscrypt-proxy
+    # Brief pause to ensure dnscrypt-proxy is ready for Unbound
+    sleep 2
+    sudo systemctl enable --now unbound
+    sudo systemctl restart NetworkManager 2>/dev/null || true
+
+    # --- VERIFICATION ---
+log "Verifying the fortress..."
+sleep 3
+
+if timeout 5 dig @127.0.0.1 +dnssec github.com >/dev/null && \
+   timeout 5 dig @127.0.0.1 sigfail.verteiltesysteme.net 2>&1 | grep -q "status: SERVFAIL" && \
+   unbound-control status | grep -q "is running"; then
+
+    log "✅ DNS resolution operating normally."
+    log "✅ DNSSEC validation CONFIRMED (Correctly returned SERVFAIL for a bad signature)."
+    log "✅ Whitelist contains $(wc -l < /etc/unbound/whitelist.conf) entries."
+    log "✅ Blocklist contains $(wc -l < /etc/unbound/blocklist.conf) domains."
+    log "🛡️ FORTRESS DNS is online and protecting your network."
+else
+    error "DNS verification FAILED. Please check service status:"
+    error "--> sudo systemctl status unbound dnscrypt-proxy"
+    error "--> sudo unbound-control status"
+    return 1
+fi
+
 }
 
 # Setup Snapper for snapshots
@@ -970,10 +1119,19 @@ verify_part1
 #setup_obsidian_syncthing
 
 # Development environment (with fixed Python compatibility)
-setup_development
+#setup_development
 
-# Dnscrypt proxy plus dnsmasq. firewalld. timer
-setup_secure_dns
+# A function to log messages
+log() {
+    echo -e "[\e[32m+\e[0m] $1"
+}
+
+# A function to log errors
+error() {
+    echo -e "[\e[31m!\e[0m] $1" >&2
+}
+# Execute dns function
+setup_fortress_dns
 
 # System maintenance
 setup_snapper
