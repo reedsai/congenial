@@ -272,9 +272,26 @@ owner /var/tmp/firefox-fortress/** rw,
 EOF
 
 
-# Create secure Firefox profile
-mkdir -p $HOME/.mozilla/firefox
-firefox -CreateProfile "$FIREFOX_PROFILE $HOME/.mozilla/firefox/fortress-secure"
+# Create secure Firefox profile and necessary directories
+log "Manually creating secure Firefox profile..."
+mkdir -p "$HOME/.mozilla/firefox/fortress-secure"
+
+# Create profiles.ini so Firefox knows about the new profile on first launch
+tee "$HOME/.mozilla/firefox/profiles.ini" > /dev/null << 'EOF'
+[Install4F96D09476724483]
+Default=fortress-secure
+Locked=1
+
+[Profile1]
+Name=fortress-secure
+IsRelative=1
+Path=fortress-secure
+Default=1
+
+[General]
+StartWithLastProfile=1
+Version=2
+EOF
 
 # Create Firefox user.js for security
 tee $HOME/.mozilla/firefox/fortress-secure/user.js > /dev/null << 'EOF'
