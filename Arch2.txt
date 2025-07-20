@@ -828,7 +828,7 @@ EOF
     echo -e "[main]\ndns=none\nsystemd-resolved=false\n[connection]\nipv6.ip6-privacy=2" | sudo tee /etc/NetworkManager/conf.d/99-dns-fortress.conf > /dev/null
 
 
-    # Correct firewall rules for firewalld
+        # Correct firewall rules for firewalld
     if command -v firewall-cmd &>/dev/null; then
         log "Applying firewalld rules to prevent DNS leaks..."
         
