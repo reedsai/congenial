@@ -853,12 +853,22 @@ EOF
 
     # Apply surgical firewall rule to allow ONLY the dnscrypt-proxy user to make outbound connections.
     if command -v firewall-cmd &>/dev/null && sudo systemctl is-active --quiet firewalld; then
-        log "Applying firewalld rule to prevent DNS leaks..."
-# Use the correct system user '_dnscrypt-proxy' with a leading underscore
-sudo firewall-cmd --permanent --zone=trusted --remove-source=uid:_dnscrypt-proxy >/dev/null 2>&1
-sudo firewall-cmd --permanent --zone=trusted --add-source=uid:_dnscrypt-proxy
-sudo firewall-cmd --reload
+    log "Applying firewalld rule to prevent DNS leaks..."
+
+    # Dynamically find the correct user for dnscrypt-proxy from its service file
+    DNSCRYPT_USER=$(grep -E '^User=' /usr/lib/systemd/system/dnscrypt-proxy.service | cut -d'=' -f2)
+
+    # Check if we successfully found a user, otherwise, report an error.
+    if [ -z "$DNSCRYPT_USER" ]; then
+        error "Could not dynamically determine the dnscrypt-proxy user. Aborting firewall rule."
+    else
+        info "Found dnscrypt-proxy running as user: $DNSCRYPT_USER. Applying rule."
+        # Use the dynamically found user to apply the firewall rule
+        sudo firewall-cmd --permanent --zone=trusted --remove-source=uid:"$DNSCRYPT_USER" >/dev/null 2>&1
+        sudo firewall-cmd --permanent --zone=trusted --add-source=uid:"$DNSCRYPT_USER"
+        sudo firewall-cmd --reload
     fi
+fi
 
     # Make resolv.conf mutable before writing, then lock it down.
     [[ -f /etc/resolv.conf ]] && sudo chattr -i /etc/resolv.conf 2>/dev/null || true
