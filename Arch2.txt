@@ -854,9 +854,10 @@ EOF
     # Apply surgical firewall rule to allow ONLY the dnscrypt-proxy user to make outbound connections.
     if command -v firewall-cmd &>/dev/null && sudo systemctl is-active --quiet firewalld; then
         log "Applying firewalld rule to prevent DNS leaks..."
-        sudo firewall-cmd --permanent --zone=trusted --remove-source=uid:dnscrypt-proxy >/dev/null 2>&1 # Clean up old rule if present
-        sudo firewall-cmd --permanent --zone=trusted --add-source=uid:dnscrypt-proxy
-        sudo firewall-cmd --reload
+# Use the correct system user '_dnscrypt-proxy' with a leading underscore
+sudo firewall-cmd --permanent --zone=trusted --remove-source=uid:_dnscrypt-proxy >/dev/null 2>&1
+sudo firewall-cmd --permanent --zone=trusted --add-source=uid:_dnscrypt-proxy
+sudo firewall-cmd --reload
     fi
 
     # Make resolv.conf mutable before writing, then lock it down.
