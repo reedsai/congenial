@@ -756,9 +756,7 @@ EOF
 
     # --- PREPARATION: Clear the ground ---
     log "Disabling and masking conflicting DNS services..."
-    sudo systemctl disable --now systemd-resolved dnsmasq 2>/dev/null |
-
-| true
+    sudo systemctl disable --now systemd-resolved dnsmasq 2>/dev/null || true
     sudo systemctl mask systemd-resolved.service
 
     # --- BLOCKLISTING ---
