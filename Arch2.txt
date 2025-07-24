@@ -610,13 +610,6 @@ setup_fortress_dns() {
     log "Installing Unbound and DNSCrypt-Proxy..."
     sudo pacman -S --needed --noconfirm unbound dnscrypt-proxy
 
-    # Verify that the dnscrypt-proxy package correctly created its dedicated user.
-    if! id "dnscrypt-proxy" &>/dev/null; then
-        error "The 'dnscrypt-proxy' user was not created. Package installation may have failed."
-        error "Check pacman logs (/var/log/pacman.log) and network connectivity."
-        return 1
-    fi
-
     # --- CONFIGURATION: DNSCrypt-Proxy (The Armored Transport) ---
     log "Configuring dnscrypt-proxy for mandatory Oblivious DoH transport..."
     sudo tee /etc/dnscrypt-proxy/dnscrypt-proxy.toml > /dev/null << 'EOF'
