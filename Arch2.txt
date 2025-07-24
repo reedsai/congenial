@@ -851,23 +851,35 @@ EOF
     sudo mkdir -p /etc/NetworkManager/conf.d
     echo -e "[main]\ndns=none\nsystemd-resolved=false\n[connection]\nipv6.ip6-privacy=2" | sudo tee /etc/NetworkManager/conf.d/99-dns-fortress.conf > /dev/null
 
-    # Apply surgical firewall rule to allow ONLY the dnscrypt-proxy user to make outbound connections.
-    if command -v firewall-cmd &>/dev/null && sudo systemctl is-active --quiet firewalld; then
+# Apply surgical firewall rule to allow ONLY the dnscrypt-proxy user to make outbound connections.
+if command -v firewall-cmd &>/dev/null && sudo systemctl is-active --quiet firewalld; then
     log "Applying firewalld rule to prevent DNS leaks..."
+    SERVICE_FILE="/usr/lib/systemd/system/dnscrypt-proxy.service"
 
-    # Dynamically find the correct user for dnscrypt-proxy from its service file
-    DNSCRYPT_USER=$(grep -E '^User=' /usr/lib/systemd/system/dnscrypt-proxy.service | cut -d'=' -f2)
-
-    # Check if we successfully found a user, otherwise, report an error.
-    if [ -z "$DNSCRYPT_USER" ]; then
-        error "Could not dynamically determine the dnscrypt-proxy user. Aborting firewall rule."
+    if [ ! -f "$SERVICE_FILE" ]; then
+        warning "dnscrypt-proxy service file not found at $SERVICE_FILE. Skipping firewall rule."
     else
-        info "Found dnscrypt-proxy running as user: $DNSCRYPT_USER. Applying rule."
-        # Use the dynamically found user to apply the firewall rule
-        sudo firewall-cmd --permanent --zone=trusted --remove-source=uid:"$DNSCRYPT_USER" >/dev/null 2>&1
-        sudo firewall-cmd --permanent --zone=trusted --add-source=uid:"$DNSCRYPT_USER"
-        sudo firewall-cmd --reload
+        # Dynamically find the correct user for dnscrypt-proxy from its service file
+        DNSCRYPT_USER=$(grep -E '^User=' "$SERVICE_FILE" | cut -d'=' -f2)
+
+        # Check if we successfully found a user, otherwise, issue a warning.
+        if [ -z "$DNSCRYPT_USER" ]; then
+            warning "Could not determine dnscrypt-proxy user from $SERVICE_FILE. Skipping firewall rule."
+        else
+            info "Found dnscrypt-proxy user: '$DNSCRYPT_USER'. Applying firewall rule."
+            # Apply the firewall rule and check for success.
+            if sudo firewall-cmd --permanent --zone=trusted --add-source="uid:$DNSCRYPT_USER" >/dev/null 2>&1 && sudo firewall-cmd --reload >/dev/null 2>&1; then
+                log "✅ Successfully applied firewalld rule for user '$DNSCRYPT_USER'."
+            else
+                # If the firewall command fails, warn the user but do not exit the script.
+                warning "Failed to apply firewalld rule. Your firewall may have a non-standard configuration."
+                warning "Continuing installation without this specific leak-prevention rule."
+            fi
+        fi
     fi
+else
+    # This message will show if firewalld is not installed or active.
+    info "firewalld is not active. Skipping firewall rule for DNS leak prevention."
 fi
 
     # Make resolv.conf mutable before writing, then lock it down.
