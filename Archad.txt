@@ -1,0 +1,55 @@
+#!/bin/bash
+#
+# 🔱 THE ARCH CITADEL - PART 2: ARSENAL DEPLOYMENT 🔱
+#
+# This script should be run after the first boot into the new system.
+# [span_26](start_span)It installs the desktop environment, user applications, and developer tools.[span_26](end_span)
+
+set -euo pipefail
+
+# Logging Functions
+log() { echo -e "\e[32m[INFO]\e[0m $1"; }
+warn() { echo -e "\e[33m[WARN]\e[0m $1"; }
+error() { echo -e "\e[31m[ERROR]\e[0m $1" >&2; exit 1; }
+
+configure_dns() {
+    log "Configuring Citadel DNS: Unbound with DNS-over-TLS..."
+    # Install Unbound
+    sudo pacman -S --noconfirm --needed unbound
+    # [span_27](start_span)Configure NetworkManager to leave DNS alone[span_27](end_span)
+    [span_28](start_span)echo -e "[main]\ndns=none\nsystemd-resolved=false" | sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf[span_28](end_span) > /dev/null
+    # [span_29](start_span)[span_30](start_span)Create a static, immutable resolv.conf[span_29](end_span)[span_30](end_span)
+    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo -e "nameserver 127.0.0.1\nnameserver ::1\noptions edns0 trust-ad" | sudo tee /etc/resolv.conf > /dev/null
+    sudo chattr +i /etc/resolv.conf
+    # [span_31](start_span)[span_32](start_span)Create a hardened Unbound configuration with DoT forwarding[span_31](end_span)[span_32](end_span)
+    sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
+server:
+    interface: 127.0.0.1@53
+    interface: ::1@53
+    access-control: 127.0.0.0/8 allow
+    access-control: ::1/128 allow
+    so-reuseport: yes
+    num-threads: $(nproc)
+    msg-cache-size: 128m
+    rrset-cache-size: 256m
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+    val-clean-additional: yes
+    harden-dnssec-stripped: yes
+    hide-identity: yes
+    hide-version: yes
+    qname-minimisation: yes
+    use-caps-for-id: yes
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: 9.9.9.9@853#dns.quad9.net
+    forward-addr: 149.112.112.112@853#dns.quad9.net
+    forward-addr: 2620:fe::fe@853#dns.quad9.net
+EOT
+    sudo systemctl enable --now unbound.service
+    sudo systemctl restart NetworkManager.service
+    log "DNS configuration complete. System is using local, encrypted DNS."
+}
+
+configure_dns
