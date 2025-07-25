@@ -280,7 +280,7 @@ cat > /mnt/etc/mkinitcpio.conf << 'EOF'
 MODULES=(btrfs)
 BINARIES=()
 FILES=()
-HOOKS=(base systemd autodetect modconf kms keyboard block sd-encrypt filesystems apparmor fsck)
+HOOKS=(base systemd autodetect modconf kms keyboard block sd-encrypt filesystems fsck)
 COMPRESSION="zstd"
 COMPRESSION_OPTIONS=(-3)
 UMASK=0077
@@ -341,7 +341,7 @@ title   Arch Fortress
 linux   /vmlinuz-linux
 initrd  /intel-ucode.img
 initrd  /initramfs-linux.img
-options rd.luks.name=$uuid=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw lsm=landlock,lockdown,yama,apparmor,bpf audit=1 zswap.enabled=0 init=/usr/lib/systemd/systemd \
+options rd.luks.name=$uuid=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw lsm=landlock,lockdown,yama,bpf audit=1 zswap.enabled=0 init=/usr/lib/systemd/systemd \
 #nvidia-drm.modeset=1
 EOF
 
@@ -354,7 +354,7 @@ title   Arch Fortress (Fallback)
 linux   /vmlinuz-linux
 initrd  /intel-ucode.img
 initrd  /initramfs-linux-fallback.img
-options rd.luks.name=$uuid=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw lsm=landlock,lockdown,yama,apparmor,bpf audit=1 zswap.enabled=0 init=/usr/lib/systemd/systemd \
+options rd.luks.name=$uuid=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw lsm=landlock,lockdown,yama,bpf audit=1 zswap.enabled=0 init=/usr/lib/systemd/systemd \
 #nvidia-drm.modeset=1
 EOF
 
