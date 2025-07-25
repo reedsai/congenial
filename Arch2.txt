@@ -56,7 +56,26 @@ log "✅ Part 1 verification complete"
 
 }
 
+# Enable multilib repository
+
+enable_multilib() {
+log “🔧 Enabling multilib repository…”
+
+# Check if multilib is already enabled
+if ! grep -q "^\[multilib\]" /etc/pacman.conf; then
+    sudo sed -i '/\[multilib\]/,/Include.*multilib/ s/^#//' /etc/pacman.conf
+    sudo pacman -Sy
+    log "✅ Multilib repository enabled"
+else
+    log "✅ Multilib repository already enabled"
+fi
+
+}
+
 # Install GPU drivers and CUDA
+
+# Enable multilib first
+enable_multilib
 
 setup_gpu_cuda() {
 log "🎮 Setting up NVIDIA GPU and CUDA…"
@@ -92,10 +111,10 @@ options nvidia NVreg_RestrictProfilingToAdminUsers=1
 EOF
 
 # Add nvidia modules to mkinitcpio.conf
-sed -i 's/MODULES=(btrfs)/MODULES=(btrfs nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+sudo sed -i 's/MODULES=(btrfs)/MODULES=(btrfs nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 
 # Regenerate initramfs after driver install
-mkinitcpio -P
+sudo mkinitcpio -P
 
 log "✅ NVIDIA GPU and CUDA setup complete"
 
@@ -234,9 +253,9 @@ tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
 #!/bin/bash
 source $HOME/.local/share/dev-env/bin/activate
 echo “🐍 Development environment activated (System Python + extras)”
-echo “Python: $(python –version)”
-echo “PyTorch: $(python -c ‘import torch; print(torch.**version**)’ 2>/dev/null || echo ‘Not available’)”
-echo “TensorFlow: $(python -c ‘import tensorflow; print(tensorflow.**version**)’ 2>/dev/null || echo ‘Not available’)”
+echo “Python: $(python --version)”
+echo "PyTorch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'Not available')"
+   echo "TensorFlow: $(python -c 'import tensorflow; print(tensorflow.__version__)' 2>/dev/null || echo 'Not available')"
 EOF
 
 
