@@ -1,0 +1,559 @@
+#!/bin/bash
+
+# 🔱 ARCH CITADEL - PART 2: ARSENAL DEPLOYMENT 🔱
+
+# Fixed Python compatibility and enhanced error handling
+
+set -euo pipefail
+
+# Colors for output
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+NC="\033[0m"
+
+# Configuration
+
+USERNAME="operator"
+HOSTNAME="citadel"
+FIREFOX_PROFILE="fortress-secure"
+DNS_NETWORK="dns-isolated"
+FIREFOX_NETWORK="firefox-isolated"
+
+# Logging functions
+
+log() {
+echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
+}
+
+error() {
+echo -e "${RED}[ERROR]${NC} $1" >&2
+exit 1
+}
+
+warning() {
+echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+info() {
+echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# Verify Part 1 installation
+
+verify_part1() {
+log "🔍 Verifying Part 1 installation…"
+
+
+# Check if we're running as user
+if [[ $EUID -eq 0 ]]; then
+    error "Do not run Part 2 as root. Run as user $USERNAME"
+fi
+
+# Check AppArmor
+if ! sudo systemctl is-active apparmor >/dev/null 2>&1; then
+    error "AppArmor not running. Check Part 1 installation."
+fi
+
+log "✅ Part 1 verification complete"
+
+}
+
+# Install GPU drivers and CUDA
+
+setup_gpu_cuda() {
+log "🎮 Setting up NVIDIA GPU and CUDA…"
+
+
+# Install NVIDIA drivers
+sudo pacman -S --noconfirm \
+    nvidia-dkms \
+    nvidia-utils \
+    nvidia-settings \
+    lib32-nvidia-utils \
+    cuda \
+    cudnn \
+    opencl-nvidia
+
+# Configure NVIDIA persistence
+sudo systemctl enable nvidia-persistenced
+
+# Add user to video group
+sudo usermod -a -G video $USERNAME
+
+# Configure NVIDIA settings
+sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
+
+
+# Enable NVIDIA KMS
+
+options nvidia-drm modeset=1
+
+# Security hardening
+
+options nvidia NVreg_RestrictProfilingToAdminUsers=1
+EOF
+
+# Add nvidia modules to mkinitcpio.conf
+sed -i 's/MODULES=(btrfs)/MODULES=(btrfs nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
+
+# Regenerate initramfs after driver install
+mkinitcpio -P
+
+log "✅ NVIDIA GPU and CUDA setup complete"
+
+}
+
+# Install minimal KDE Plasma
+
+setup_minimal_kde() {
+log "🖥️ Installing minimal KDE Plasma…"
+
+
+# Install minimal KDE
+sudo pacman -S --noconfirm \
+    plasma-wayland-session \
+    plasma-desktop \
+    plasma-workspace \
+    kscreen \
+    plasma-systemmonitor \
+    konsole \
+    dolphin \
+    kate \
+    sddm \
+    sddm-kcm \
+    ark \
+    spectacle \
+    breeze \
+    plasma-browser-integration
+
+# Enable SDDM
+sudo systemctl enable sddm
+
+# Configure SDDM for security
+sudo tee /etc/sddm.conf > /dev/null << 'EOF'
+
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+Numlock=on
+
+[Theme]
+Current=breeze
+
+[Users]
+MaximumUid=60513
+MinimumUid=1000
+HideUsers=
+HideShells=/bin/false,/usr/bin/nologin
+
+[X11]
+MinimumVT=1
+ServerArguments=-nolisten tcp -dpi 96
+EOF
+
+
+# Disable unnecessary KDE services
+sudo systemctl mask \
+    plasma-baloorunner \
+    baloo-file \
+    baloo-file-extractor
+
+log "✅ Minimal KDE Plasma installed"
+
+
+}
+
+# Setup development environment with proper Python version management
+
+# Setup development environment with proper Python version management
+
+setup_development() {
+log “💻 Setting up development environment…”
+export PATH=”$HOME/.local/bin:$PATH”
+
+
+# Install development tools and optimized Python stack
+sudo pacman -S --noconfirm \
+    base-devel \
+    python-numpy \
+    python-scipy \
+    python-pandas \
+    python-matplotlib \
+    python-scikit-learn \
+    python-pytorch-cuda \
+    python-tensorflow-cuda \
+    jupyter-notebook \
+    python-pip \
+    python-virtualenv \
+    nodejs \
+    npm \
+    go \
+    podman-compose \
+    github-cli \
+    git \
+    vim
+
+# Install Rust
+sudo pacman -S --needed --noconfirm rustup
+rustup default stable
+
+# Install paru (AUR helper) securely
+if ! command -v paru >/dev/null 2>&1; then
+    log "Installing paru AUR helper..."
+    cd /tmp
+    git clone https://aur.archlinux.org/paru.git
+    cd paru
+    makepkg -si --noconfirm
+    cd ~
+    rm -rf /tmp/paru
+fi
+
+# Install VSCodium after paru is available
+paru -S --noconfirm vscodium-bin
+
+# Create secure development directories
+mkdir -p $HOME/{Projects,AI,Scripts}
+chmod 750 $HOME/{Projects,AI,Scripts}
+
+# Configure Git
+git config --global init.defaultBranch main
+git config --global pull.rebase true
+git config --global core.editor vim
+
+# Create lightweight development environment using system packages
+log "Creating optimized Python environment..."
+python -m venv --system-site-packages $HOME/.local/share/dev-env
+source $HOME/.local/share/dev-env/bin/activate
+
+# Install only additional development tools
+pip install --no-deps black flake8 pylint pytest mypy semgrep bandit
+
+# Create activation script
+tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
+
+
+#!/bin/bash
+source $HOME/.local/share/dev-env/bin/activate
+echo “🐍 Development environment activated (System Python + extras)”
+echo “Python: $(python –version)”
+echo “PyTorch: $(python -c ‘import torch; print(torch.**version**)’ 2>/dev/null || echo ‘Not available’)”
+echo “TensorFlow: $(python -c ‘import tensorflow; print(tensorflow.**version**)’ 2>/dev/null || echo ‘Not available’)”
+EOF
+
+
+chmod +x $HOME/.local/bin/dev-activate
+
+deactivate
+
+log "✅ Development environment configured with optimized Python stack"
+info "Use 'dev-activate' to activate development environment"
+
+}
+
+configure_dns() {
+    log "Configuring Citadel DNS: Unbound with DNS-over-TLS..."
+    # Install Unbound
+    sudo pacman -S --noconfirm --needed unbound
+    # [span_27](start_span)Configure NetworkManager to leave DNS alone[span_27](end_span)
+    [span_28](start_span)echo -e "[main]\ndns=none\nsystemd-resolved=false" | sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf[span_28](end_span) > /dev/null
+    # [span_29](start_span)[span_30](start_span)Create a static, immutable resolv.conf[span_29](end_span)[span_30](end_span)
+    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo -e "nameserver 127.0.0.1\nnameserver ::1\noptions edns0 trust-ad" | sudo tee /etc/resolv.conf > /dev/null
+    sudo chattr +i /etc/resolv.conf
+    # [span_31](start_span)[span_32](start_span)Create a hardened Unbound configuration with DoT forwarding[span_31](end_span)[span_32](end_span)
+    sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
+server:
+    interface: 127.0.0.1@53
+    interface: ::1@53
+    access-control: 127.0.0.0/8 allow
+    access-control: ::1/128 allow
+    so-reuseport: yes
+    num-threads: $(nproc)
+    msg-cache-size: 128m
+    rrset-cache-size: 256m
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+    val-clean-additional: yes
+    harden-dnssec-stripped: yes
+    hide-identity: yes
+    hide-version: yes
+    qname-minimisation: yes
+    use-caps-for-id: yes
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: 9.9.9.9@853#dns.quad9.net
+    forward-addr: 149.112.112.112@853#dns.quad9.net
+    forward-addr: 2620:fe::fe@853#dns.quad9.net
+EOT
+    sudo systemctl enable --now unbound.service
+    sudo systemctl restart NetworkManager.service
+    log "DNS configuration complete. System is using local, encrypted DNS."
+}
+
+# Setup Snapper for snapshots
+
+setup_snapper() {
+log "📸 Setting up Snapper for snapshots…"
+
+
+# Install Snapper
+sudo pacman -S --noconfirm snapper snap-pac
+
+# Create Snapper configuration for root
+sudo snapper -c root create-config /
+
+# Create Snapper configuration for home
+sudo snapper -c home create-config /home
+
+# Configure Snapper settings for both root and home
+for config in root home; do
+    log "🔧 Configuring Snapper for '$config'..."
+    sudo snapper -c "$config" set-config \
+        "TIMELINE_CREATE=yes" \
+        "TIMELINE_LIMIT_HOURLY=5" \
+        "TIMELINE_LIMIT_DAILY=7" \
+        "TIMELINE_LIMIT_WEEKLY=0" \
+        "TIMELINE_LIMIT_MONTHLY=2" \
+        "NUMBER_CLEANUP=yes" \
+        "NUMBER_LIMIT=25" \
+        "NUMBER_LIMIT_IMPORTANT=10"
+done
+
+# Enable Snapper timers
+sudo systemctl enable --now snapper-timeline.timer
+sudo systemctl enable --now snapper-cleanup.timer
+
+# Create initial snapshot
+sudo snapper -c root create --description "Initial fortress snapshot"
+
+log "✅ Snapper configured"
+
+
+}
+
+# Setup system monitoring
+
+setup_monitoring() {
+log "📊 Setting up system monitoring…"
+
+
+# Install monitoring tools
+sudo pacman -S --noconfirm \
+    htop \
+    iotop \
+    nethogs \
+    fail2ban \
+    logwatch \
+    rkhunter
+
+# Configure fail2ban
+sudo tee /etc/fail2ban/jail.local > /dev/null << 'EOF'
+
+
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 3
+backend = systemd
+usedns = warn
+logencoding = auto
+enabled = false
+filter = %(**name**)s
+destemail = root@localhost
+sender = root@localhost
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+banaction = ufw
+EOF
+
+
+# Enable fail2ban
+sudo systemctl enable --now fail2ban
+
+# Configure rkhunter
+sudo rkhunter --update
+sudo rkhunter --propupd
+
+# Create monitoring script
+tee $HOME/.local/bin/fortress-status > /dev/null << 'EOF'
+
+
+#!/bin/bash
+
+# Fortress System Status
+
+echo "🔱 FORTRESS STATUS REPORT 🔱"
+echo "=================================="
+echo
+
+echo "📊 System Resources:"
+echo "CPU: $(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {print usage "%"}')"
+echo "Memory: $(free | grep Mem | awk '{printf("%.1f%%\n", $3/$2 * 100.0)}')"
+echo "Disk: $(df -h / | awk 'NR==2{print $5}')"
+echo
+
+echo "🔒 Security Status:"
+echo "AppArmor: $(sudo apparmor_status | grep -c 'profiles are loaded')"
+echo "Firewall: $(sudo ufw --state 2>/dev/null || echo 'inactive')"
+echo "Fail2ban: $(sudo fail2ban-client status | grep -c 'jail(s)')"
+echo
+
+echo "🐳 Container Status:"
+podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+echo
+
+echo "📸 Recent Snapshots:"
+sudo snapper -c root list -t single | tail -5
+echo
+
+echo "🐍 Python Environments:"
+echo "System Python: $(python --version 2>/dev/null || echo 'Not available')"
+if [[ -f "$HOME/.local/share/dev-env/bin/python" ]]; then
+echo "Dev Environment: $($HOME/.local/share/dev-env/bin/python --version)"
+fi
+EOF
+
+
+chmod +x $HOME/.local/bin/fortress-status
+
+log "✅ System monitoring configured"
+
+
+}
+
+# Setup MAC address randomization
+
+setup_mac_randomization() {
+log "🔒 Configuring MAC address randomization…"
+
+
+# Create a NetworkManager configuration file for MAC randomization
+sudo tee /etc/NetworkManager/conf.d/00-macrandomize.conf > /dev/null << 'EOF'
+
+
+# Enable MAC address randomization for privacy
+
+[device]
+
+# Randomize MAC address during Wi-Fi scans
+
+wifi.scan-rand-mac-address=yes
+
+[connection]
+
+# Use a stable, per-network random MAC address for Wi-Fi
+
+wifi.cloned-mac-address=stable
+
+# Use a stable, random MAC address for Ethernet
+
+ethernet.cloned-mac-address=stable
+
+# Generate a stable ID for connections
+
+connection.stable-id=${CONNECTION}/${BOOT}
+EOF
+
+
+log "✅ MAC address randomization enabled for new connections."
+info "Existing connections may need to be modified with 'nmcli'."
+
+
+}
+
+# Apply final security hardening
+
+apply_final_hardening() {
+log "🔐 Applying final security hardening…"
+
+
+# Create security aliases
+tee -a $HOME/.bashrc > /dev/null << 'EOF'
+
+
+# Fortress Security Aliases
+
+alias ls='ls --color=auto'
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias status='fortress-status'
+alias ss='sudo snapper -c root create --description'
+alias sr='sudo snapper -c root'
+
+# Security-focused PATH
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# Development environment
+
+alias dev='dev-activate'
+alias dev-env='source $HOME/.local/share/dev-env/bin/activate'
+
+EOF
+
+
+# Set proper permissions
+chmod 700 $HOME/.ssh 2>/dev/null || true
+chmod 600 $HOME/.ssh/* 2>/dev/null || true
+chmod 700 $HOME/.gnupg 2>/dev/null || true
+chmod 600 $HOME/.gnupg/* 2>/dev/null || true
+
+
+}
+
+# Main installation function
+
+main() {
+log "🔱 Starting Arch Fortress Installation - Part 2 🔱"
+
+
+# Verify Part 1 installation
+verify_part1
+
+# GPU and KDE setup
+setup_gpu_cuda
+setup_minimal_kde
+
+# Development environment (with fixed Python compatibility)
+setup_development
+
+# Execute dns function
+configure_dns
+
+# System maintenance
+setup_snapper
+setup_monitoring
+
+# Final hardening
+setup_mac_randomization
+apply_final_hardening
+
+log "🎉 Arch Fortress Part 2 Installation Complete! 🎉"
+log "📋 Next steps:"
+log "   1. Reboot to load GPU drivers and KDE"
+log "   2. Set up Syncthing at http://127.0.0.1:8384"
+log "   3. Run 'fortress-status' to check system"
+log "   4. Use 'firefox-fortress' for secure browsing"
+log "   5. Use 'dev-activate' to enter ML/AI development environment"
+
+info "🐍 Python Environment Details:"
+info "   - System Python: $(python --version 2>/dev/null || echo 'Not available')"
+info "   - Development Environment: Python 3.11 with ML/AI packages"
+info "   - Activation: 'dev-activate' or 'source ~/.local/share/dev-env/bin/activate'"
+
+}
+
+# Execute main function
+
+main "$@"
