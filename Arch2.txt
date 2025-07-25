@@ -253,13 +253,13 @@ configure_dns() {
     log "Configuring Citadel DNS: Unbound with DNS-over-TLS..."
     # Install Unbound
     sudo pacman -S --noconfirm --needed unbound
-    # [span_27](start_span)Configure NetworkManager to leave DNS alone[span_27](end_span)
-    [span_28](start_span)echo -e "[main]\ndns=none\nsystemd-resolved=false" | sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf[span_28](end_span) > /dev/null
-    # [span_29](start_span)[span_30](start_span)Create a static, immutable resolv.conf[span_29](end_span)[span_30](end_span)
+    # Configure NetworkManager to leave DNS alone
+    echo -e "[main]\ndns=none\nsystemd-resolved=false" | sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf > /dev/null
+    # Create a static, immutable resolv.conf
     sudo chattr -i /etc/resolv.conf 2>/dev/null || true
     echo -e "nameserver 127.0.0.1\nnameserver ::1\noptions edns0 trust-ad" | sudo tee /etc/resolv.conf > /dev/null
     sudo chattr +i /etc/resolv.conf
-    # [span_31](start_span)[span_32](start_span)Create a hardened Unbound configuration with DoT forwarding[span_31](end_span)[span_32](end_span)
+    # Create a hardened Unbound configuration with DoT forwarding
     sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
 server:
     interface: 127.0.0.1@53
@@ -267,7 +267,7 @@ server:
     access-control: 127.0.0.0/8 allow
     access-control: ::1/128 allow
     so-reuseport: yes
-    num-threads: $(nproc)
+    num-threads: 4
     msg-cache-size: 128m
     rrset-cache-size: 256m
     auto-trust-anchor-file: "/var/lib/unbound/root.key"
