@@ -276,7 +276,7 @@ sudo pacman -S --noconfirm --needed unbound dnsutils ca-certificates ca-certific
 
 # Ensure CA certificates are properly installed and updated
 log "Updating CA certificates..."
-sudo update-ca-certificates
+sudo update-ca-trust
 
 # Ensure systemd-resolved is stopped and disabled to prevent conflicts
 log "Disabling systemd-resolved to prevent conflicts..."
@@ -475,42 +475,42 @@ ip addr show lo
 # Setup Snapper for snapshots
 
 setup_snapper() {
-log "📸 Setting up Snapper for snapshots…"
+    log "📸 Setting up Snapper for snapshots..."
 
+    # Install Snapper and the pacman hook
+    sudo pacman -S --noconfirm snapper snap-pac
 
-# Install Snapper
-sudo pacman -S --noconfirm snapper snap-pac
+    # --- FIX: Manually create the config files to use existing subvolumes ---
+    # This avoids the conflict where snapper tries to create a subvolume that already exists.
 
-# Create Snapper configuration for root
-sudo snapper -c root create-config /
+    # Create the config for the root filesystem
+    sudo snapper -c root create-config -f btrfs /
+    
+    # Create the config for the home directory
+    sudo snapper -c home create-config -f btrfs /home
 
-# Create Snapper configuration for home
-sudo snapper -c home create-config /home
+    log "🔧 Configuring Snapper policies for 'root' and 'home'..."
+    for config in root home; do
+        sudo snapper -c "$config" set-config \
+            "TIMELINE_CREATE=yes" \
+            "TIMELINE_LIMIT_HOURLY=5" \
+            "TIMELINE_LIMIT_DAILY=7" \
+            "TIMELINE_LIMIT_WEEKLY=0" \
+            "TIMELINE_LIMIT_MONTHLY=2" \
+            "NUMBER_CLEANUP=yes" \
+            "NUMBER_LIMIT=25" \
+            "NUMBER_LIMIT_IMPORTANT=10"
+    done
 
-# Configure Snapper settings for both root and home
-for config in root home; do
-    log "🔧 Configuring Snapper for '$config'..."
-    sudo snapper -c "$config" set-config \
-        "TIMELINE_CREATE=yes" \
-        "TIMELINE_LIMIT_HOURLY=5" \
-        "TIMELINE_LIMIT_DAILY=7" \
-        "TIMELINE_LIMIT_WEEKLY=0" \
-        "TIMELINE_LIMIT_MONTHLY=2" \
-        "NUMBER_CLEANUP=yes" \
-        "NUMBER_LIMIT=25" \
-        "NUMBER_LIMIT_IMPORTANT=10"
-done
+    # Enable Snapper's automatic timeline and cleanup services
+    sudo systemctl enable --now snapper-timeline.timer
+    sudo systemctl enable --now snapper-cleanup.timer
 
-# Enable Snapper timers
-sudo systemctl enable --now snapper-timeline.timer
-sudo systemctl enable --now snapper-cleanup.timer
+    # Create an initial snapshot to confirm everything is working
+    sudo snapper -c root create --description "Initial root snapshot after setup"
+    sudo snapper -c home create --description "Initial home snapshot after setup"
 
-# Create initial snapshot
-sudo snapper -c root create --description "Initial fortress snapshot"
-
-log "✅ Snapper configured"
-
-
+    log "✅ Snapper configured successfully with existing subvolumes."
 }
 
 # Setup system monitoring
