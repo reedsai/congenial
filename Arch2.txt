@@ -268,74 +268,208 @@ info "Use 'dev-activate' to activate development environment"
 }
 
 configure_dns() {
-    log "Configuring Citadel DNS: Unbound with DNS-over-TLS..."
+log “Configuring Citadel DNS: Unbound with DNS-over-TLS…”
 
-    # Install Unbound and DNS utilities
-    sudo pacman -S --noconfirm --needed unbound dnsutils
 
-    # Ensure systemd-resolved is stopped and disabled to prevent conflicts
-    log "Disabling systemd-resolved to prevent conflicts..."
-    sudo systemctl stop systemd-resolved.service 2>/dev/null || true
-    sudo systemctl disable systemd-resolved.service 2>/dev/null || true
+# Install Unbound, DNS utilities, and ensure CA certificates are present
+sudo pacman -S --noconfirm --needed unbound dnsutils ca-certificates ca-certificates-utils
 
-    # Configure NetworkManager to not manage /etc/resolv.conf
-    log "Configuring NetworkManager to ignore DNS..."
-    sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf > /dev/null << 'EOF'
+# Ensure CA certificates are properly installed and updated
+log "Updating CA certificates..."
+sudo update-ca-certificates
+
+# Ensure systemd-resolved is stopped and disabled to prevent conflicts
+log "Disabling systemd-resolved to prevent conflicts..."
+sudo systemctl stop systemd-resolved.service 2>/dev/null || true
+sudo systemctl disable systemd-resolved.service 2>/dev/null || true
+
+# Remove any existing resolv.conf symlink
+sudo rm -f /etc/resolv.conf
+
+# Configure NetworkManager to not manage /etc/resolv.conf
+log "Configuring NetworkManager to ignore DNS..."
+sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf > /dev/null << 'EOF'
+
+
 [main]
 dns=none
 systemd-resolved=false
 EOF
 
-    # Create a hardened Unbound configuration with DoT forwarding
-    log "Creating hardened Unbound configuration..."
-    sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
+
+# Backup original unbound config
+sudo cp /etc/unbound/unbound.conf /etc/unbound/unbound.conf.backup 2>/dev/null || true
+
+# Create a hardened Unbound configuration with DoT forwarding and proper certificate verification
+log "Creating hardened Unbound configuration with certificate verification..."
+sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
+
+
 server:
-    # Listen on localhost for both IPv4 and IPv6
-    interface: 127.0.0.1@53
-    interface: ::1@53
-    access-control: 127.0.0.0/8 allow
-    access-control: ::1/128 allow
-    
-    # Performance and security settings
-    num-threads: 4
-    so-reuseport: yes
-    msg-cache-size: 128m
-    rrset-cache-size: 256m
-    harden-dnssec-stripped: yes
-    hide-identity: yes
-    hide-version: yes
-    qname-minimisation: yes
-    use-caps-for-id: yes
-    val-clean-additional: yes
+# Basic server configuration
+interface: 127.0.0.1@53
+interface: ::1@53
+port: 53
+do-ip4: yes
+do-ip6: yes
+do-udp: yes
+do-tcp: yes
+
+
+# Access control
+access-control: 127.0.0.0/8 allow
+access-control: ::1/128 allow
+access-control: 0.0.0.0/0 refuse
+
+# Performance settings
+num-threads: 2
+so-reuseport: yes
+msg-cache-size: 128m
+rrset-cache-size: 256m
+cache-min-ttl: 0
+cache-max-ttl: 86400
+
+# Security and privacy settings
+harden-dnssec-stripped: yes
+harden-below-nxdomain: yes
+harden-referral-path: yes
+hide-identity: yes
+hide-version: yes
+qname-minimisation: yes
+use-caps-for-id: yes
+val-clean-additional: yes
+unwanted-reply-threshold: 10000
+
+# TLS certificate verification - CRITICAL for security
+tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+
+# Logging (disable in production for performance)
+verbosity: 1
+log-queries: no
+log-replies: no
+
 
 forward-zone:
-    name: "."
-    forward-tls-upstream: yes
-    # Using Quad9 for DNS-over-TLS
-    forward-addr: 9.9.9.9@853#dns.quad9.net
-    forward-addr: 149.112.112.112@853#dns.quad9.net
-    forward-addr: 2620:fe::fe@853#dns.quad9.net
+name: “.”
+forward-tls-upstream: yes
+
+
+# Primary DNS-over-TLS servers with certificate verification
+# Quad9 (Malware blocking, DNSSEC validation)
+forward-addr: 9.9.9.9@853#dns.quad9.net
+forward-addr: 149.112.112.112@853#dns.quad9.net
+forward-addr: 2620:fe::fe@853#dns.quad9.net
+forward-addr: 2620:fe::9@853#dns.quad9.net
+
+# Cloudflare as backup (comment out if you prefer only Quad9)
+# forward-addr: 1.1.1.1@853#cloudflare-dns.com
+# forward-addr: 1.0.0.1@853#cloudflare-dns.com
+
+
 EOT
 
-    # Set static DNS to localhost and make it immutable
-    log "Setting system resolver to localhost..."
-    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-    echo -e "nameserver 127.0.0.1\nnameserver ::1" | sudo tee /etc/resolv.conf > /dev/null
-    sudo chattr +i /etc/resolv.conf
 
-    # Restart NetworkManager first, then enable and start unbound
-    log "Restarting network services..."
-    sudo systemctl restart NetworkManager.service
-    sudo systemctl enable --now unbound.service
+# Create unbound user and group if they don't exist
+if ! id -u unbound >/dev/null 2>&1; then
+    sudo useradd -r -d /etc/unbound -s /bin/false unbound
+fi
 
-    # Verify that the local resolver is working
-    log "Testing DNS resolution via localhost..."
-    sleep 3 # Give unbound a moment to initialize
-    if dig +short @127.0.0.1 google.com >/dev/null; then
+# Set proper ownership and permissions
+sudo chown -R unbound:unbound /etc/unbound
+sudo chmod 755 /etc/unbound
+sudo chmod 644 /etc/unbound/unbound.conf
+
+# Test unbound configuration
+log "Testing Unbound configuration..."
+if ! sudo unbound-checkconf /etc/unbound/unbound.conf; then
+    error "Unbound configuration test failed. Check the configuration."
+fi
+
+# Set static DNS to localhost and make it immutable
+log "Setting system resolver to localhost..."
+sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+echo -e "# Generated by Citadel DNS setup\nnameserver 127.0.0.1\nnameserver ::1" | sudo tee /etc/resolv.conf > /dev/null
+sudo chattr +i /etc/resolv.conf
+
+# Restart NetworkManager first
+log "Restarting NetworkManager..."
+sudo systemctl restart NetworkManager.service
+
+# Enable and start unbound
+log "Starting Unbound service..."
+sudo systemctl enable unbound.service
+sudo systemctl restart unbound.service
+
+# Wait for service to fully start
+sleep 5
+
+# Check if unbound is running
+if ! sudo systemctl is-active --quiet unbound.service; then
+    error "Unbound service failed to start. Check 'sudo journalctl -u unbound -f' for details."
+fi
+
+# Verify DNS resolution through localhost
+log "Testing DNS resolution via localhost..."
+local test_attempts=0
+local max_attempts=3
+
+while [ $test_attempts -lt $max_attempts ]; do
+    if dig +short +time=5 @127.0.0.1 google.com >/dev/null 2>&1; then
         log "✅ DNS configuration complete. System is using local, encrypted DNS."
+        
+        # Show TLS status
+        log "Testing TLS connectivity to DNS servers..."
+        if timeout 10 openssl s_client -connect 9.9.9.9:853 -servername dns.quad9.net </dev/null >/dev/null 2>&1; then
+            log "✅ TLS connection to Quad9 successful"
+        else
+            warning "TLS connection test to Quad9 failed"
+        fi
+        
+        return 0
     else
-        error "DNS validation failed. Unbound may not be working correctly."
+        test_attempts=$((test_attempts + 1))
+        log "DNS test attempt $test_attempts/$max_attempts failed, retrying..."
+        sleep 3
     fi
+done
+
+error "DNS validation failed after $max_attempts attempts. Check 'sudo journalctl -u unbound -f' for errors."
+
+
+}
+
+# Additional diagnostic function to help troubleshoot DNS issues
+
+diagnose_dns() {
+log “🔍 Running DNS diagnostics…”
+
+
+echo "=== System DNS Status ==="
+cat /etc/resolv.conf
+echo
+
+echo "=== Unbound Service Status ==="
+sudo systemctl status unbound --no-pager -l
+echo
+
+echo "=== Recent Unbound Logs ==="
+sudo journalctl -u unbound --no-pager -n 20
+echo
+
+echo "=== DNS Resolution Tests ==="
+echo "Testing localhost resolver:"
+dig +short @127.0.0.1 google.com || echo "Failed"
+
+echo "Testing direct DNS-over-TLS:"
+timeout 5 openssl s_client -connect 9.9.9.9:853 -servername dns.quad9.net </dev/null 2>/dev/null && echo "TLS connection successful" || echo "TLS connection failed"
+
+echo "=== CA Certificates Status ==="
+ls -la /etc/ssl/certs/ca-certificates.crt || echo "CA certificates not found"
+
+echo "=== Network Interfaces ==="
+ip addr show lo
+
+
 }
 
 # Setup Snapper for snapshots
