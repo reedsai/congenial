@@ -52,11 +52,6 @@ if [[ $EUID -eq 0 ]]; then
     error "Do not run Part 2 as root. Run as user $USERNAME"
 fi
 
-# Check AppArmor
-if ! sudo systemctl is-active apparmor >/dev/null 2>&1; then
-    error "AppArmor not running. Check Part 1 installation."
-fi
-
 log "✅ Part 1 verification complete"
 
 }
@@ -402,7 +397,6 @@ echo "Disk: $(df -h / | awk 'NR==2{print $5}')"
 echo
 
 echo "🔒 Security Status:"
-echo "AppArmor: $(sudo apparmor_status | grep -c 'profiles are loaded')"
 echo "Firewall: $(sudo ufw --state 2>/dev/null || echo 'inactive')"
 echo "Fail2ban: $(sudo fail2ban-client status | grep -c 'jail(s)')"
 echo

@@ -230,7 +230,6 @@ pacstrap -K /mnt \
     btrfs-progs \
     cryptsetup \
     networkmanager \
-    apparmor \
     ufw \
     git \
     vim \
