@@ -477,18 +477,22 @@ ip addr show lo
 setup_snapper() {
     log "📸 Setting up Snapper for snapshots..."
 
-    # Install Snapper and the pacman hook
-    sudo pacman -S --noconfirm snapper snap-pac
+    # STEP 1: Install Snapper ONLY.
+    # We do this first to make the 'snapper' command available.
+    sudo pacman -S --noconfirm --needed snapper
 
-    # --- FIX: Manually create the config files to use existing subvolumes ---
-    # This avoids the conflict where snapper tries to create a subvolume that already exists.
-
-    # Create the config for the root filesystem
+    # STEP 2: Create the configurations BEFORE snap-pac is installed.
+    # This command now works because the conflicting hook doesn't exist yet.
+    # It will correctly adopt the existing subvolumes created in Part 1.
+    log "Creating Snapper configs for existing BTRFS subvolumes..."
     sudo snapper -c root create-config -f btrfs /
-    
-    # Create the config for the home directory
     sudo snapper -c home create-config -f btrfs /home
 
+    # STEP 3: Now install snap-pac.
+    # Its post-install hook will find the configs we just created and will not error.
+    sudo pacman -S --noconfirm --needed snap-pac
+
+    # STEP 4: Apply the timeline and cleanup settings to the configs.
     log "🔧 Configuring Snapper policies for 'root' and 'home'..."
     for config in root home; do
         sudo snapper -c "$config" set-config \
@@ -502,16 +506,17 @@ setup_snapper() {
             "NUMBER_LIMIT_IMPORTANT=10"
     done
 
-    # Enable Snapper's automatic timeline and cleanup services
+    # STEP 5: Enable and start the Snapper services.
     sudo systemctl enable --now snapper-timeline.timer
     sudo systemctl enable --now snapper-cleanup.timer
 
-    # Create an initial snapshot to confirm everything is working
+    # STEP 6: Create initial snapshots to confirm everything is working.
     sudo snapper -c root create --description "Initial root snapshot after setup"
     sudo snapper -c home create --description "Initial home snapshot after setup"
 
-    log "✅ Snapper configured successfully with existing subvolumes."
+    log "✅ Snapper configured successfully."
 }
+
 
 # Setup system monitoring
 
