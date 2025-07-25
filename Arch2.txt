@@ -128,7 +128,7 @@ log "🖥️ Installing minimal KDE Plasma…"
 
 # Install minimal KDE
 sudo pacman -S --noconfirm \
-    plasma-wayland-session \
+    plasma-wayland-protocols \
     plasma-desktop \
     plasma-workspace \
     kscreen \
@@ -137,7 +137,6 @@ sudo pacman -S --noconfirm \
     dolphin \
     kate \
     sddm \
-    sddm-kcm \
     ark \
     spectacle \
     breeze \
@@ -247,8 +246,8 @@ source $HOME/.local/share/dev-env/bin/activate
 pip install --no-deps black flake8 pylint pytest mypy semgrep bandit
 
 # Create activation script
+mkdir -p $HOME/.local/bin
 tee $HOME/.local/bin/dev-activate > /dev/null << 'EOF'
-
 
 #!/bin/bash
 source $HOME/.local/share/dev-env/bin/activate
@@ -270,42 +269,73 @@ info "Use 'dev-activate' to activate development environment"
 
 configure_dns() {
     log "Configuring Citadel DNS: Unbound with DNS-over-TLS..."
-    # Install Unbound
-    sudo pacman -S --noconfirm --needed unbound
-    # Configure NetworkManager to leave DNS alone
-    echo -e "[main]\ndns=none\nsystemd-resolved=false" | sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf > /dev/null
-    # Create a static, immutable resolv.conf
-    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-    echo -e "nameserver 127.0.0.1\nnameserver ::1\noptions edns0 trust-ad" | sudo tee /etc/resolv.conf > /dev/null
-    sudo chattr +i /etc/resolv.conf
+
+    # Install Unbound and DNS utilities
+    sudo pacman -S --noconfirm --needed unbound dnsutils
+
+    # Ensure systemd-resolved is stopped and disabled to prevent conflicts
+    log "Disabling systemd-resolved to prevent conflicts..."
+    sudo systemctl stop systemd-resolved.service 2>/dev/null || true
+    sudo systemctl disable systemd-resolved.service 2>/dev/null || true
+
+    # Configure NetworkManager to not manage /etc/resolv.conf
+    log "Configuring NetworkManager to ignore DNS..."
+    sudo tee /etc/NetworkManager/conf.d/99-disable-dns.conf > /dev/null << 'EOF'
+[main]
+dns=none
+systemd-resolved=false
+EOF
+
     # Create a hardened Unbound configuration with DoT forwarding
+    log "Creating hardened Unbound configuration..."
     sudo tee /etc/unbound/unbound.conf > /dev/null <<'EOT'
 server:
+    # Listen on localhost for both IPv4 and IPv6
     interface: 127.0.0.1@53
     interface: ::1@53
     access-control: 127.0.0.0/8 allow
     access-control: ::1/128 allow
-    so-reuseport: yes
+    
+    # Performance and security settings
     num-threads: 4
+    so-reuseport: yes
     msg-cache-size: 128m
     rrset-cache-size: 256m
-    auto-trust-anchor-file: "/var/lib/unbound/root.key"
-    val-clean-additional: yes
     harden-dnssec-stripped: yes
     hide-identity: yes
     hide-version: yes
     qname-minimisation: yes
     use-caps-for-id: yes
+    val-clean-additional: yes
+
 forward-zone:
     name: "."
     forward-tls-upstream: yes
+    # Using Quad9 for DNS-over-TLS
     forward-addr: 9.9.9.9@853#dns.quad9.net
     forward-addr: 149.112.112.112@853#dns.quad9.net
     forward-addr: 2620:fe::fe@853#dns.quad9.net
 EOT
-    sudo systemctl enable --now unbound.service
+
+    # Set static DNS to localhost and make it immutable
+    log "Setting system resolver to localhost..."
+    sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo -e "nameserver 127.0.0.1\nnameserver ::1" | sudo tee /etc/resolv.conf > /dev/null
+    sudo chattr +i /etc/resolv.conf
+
+    # Restart NetworkManager first, then enable and start unbound
+    log "Restarting network services..."
     sudo systemctl restart NetworkManager.service
-    log "DNS configuration complete. System is using local, encrypted DNS."
+    sudo systemctl enable --now unbound.service
+
+    # Verify that the local resolver is working
+    log "Testing DNS resolution via localhost..."
+    sleep 3 # Give unbound a moment to initialize
+    if dig +short @127.0.0.1 google.com >/dev/null; then
+        log "✅ DNS configuration complete. System is using local, encrypted DNS."
+    else
+        error "DNS validation failed. Unbound may not be working correctly."
+    fi
 }
 
 # Setup Snapper for snapshots
