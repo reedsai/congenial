@@ -1,53 +1,71 @@
-#!/bin/bash
+setup_nftables_firewall() {
+log “🔥 Setting up simple nftables firewall (from GitHub user jflopezfernandez)…”
 
-# A raw iptables firewall script that enforces a "Default Deny" policy.
 
-# --- 1. Flush all existing rules, chains, and counters ---
-echo "Flushing all existing iptables rules..."
-iptables -F
-iptables -X
-iptables -t nat -F
-iptables -t nat -X
-iptables -t mangle -F
-iptables -t mangle -X
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
+arch-chroot /mnt pacman -S --noconfirm nftables
 
-# --- 2. Set default "Default Deny" policies ---
-echo "Setting default DROP policies..."
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT DROP
+cat > /mnt/etc/nftables.conf << 'EOF'
 
-# --- 3. Allow all loopback traffic ---
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A OUTPUT -o lo -j ACCEPT
 
-# --- 4. Allow established connections (CRITICAL for a stateful firewall) ---
-# This allows return traffic for connections you have initiated.
-iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+#!/usr/bin/nft -f
 
-# --- 5. Allow specific INCOMING traffic ---
-iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT # Allow new SSH connections
-iptables -A INPUT -p udp --sport 67 --dport 68 -j ACCEPT # Allow DHCP responses
+# Delete all previously established rules
 
-# --- 6. Allow specific OUTGOING traffic ---
-# Allow apps to talk to our local DNS server (dnscrypt-proxy)
-iptables -A OUTPUT -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -d 127.0.0.1 -p tcp --dport 53 -j ACCEPT
+flush ruleset
 
-# Allow secure DNS (DoH) and general HTTPS web Browse
-iptables -A OUTPUT -p tcp --dport 443 -m conntrack --ctstate NEW -j ACCEPT
+table inet firewall {
+# The following rules apply to packets coming in.
+chain input {
+# Drop all traffic by default, unless it meets
+# one of the filter criteria specified by the
+# rules that follow.
+type filter hook input priority 0; policy drop;
 
-# Allow basic HTTP
-iptables -A OUTPUT -p tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT
 
-# Allow ping
-iptables -A OUTPUT -p icmp --icmp-type 8 -j ACCEPT
+    # Allow established/related connections.
+    ct state { established, related } accept
+    
+    # Early drop of invalid connections
+    # and packets.
+    ct state invalid drop
+    
+    # Allow traffic from the loopback interface.
+    iifname lo accept
+    
+    # Allow all ICMP and IGMP traffic, but enforce a
+    # rate limit to help prevent some types of flood
+    # attacks.
+    ip protocol icmp limit rate 4/second accept
+    ip6 nexthdr ipv6-icmp limit rate 4/second accept
+    ip protocol igmp limit rate 4/second accept
+    
+    # Allow SSH connections
+    tcp dport ssh accept
+}
 
-# Allow time sync
-iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
+# We're not a router, so we don't need to forward
+# anything. Drop all forward-requested packets.
+chain forward {
+    type filter hook forward priority 0
+    policy drop
+}
 
-echo "iptables firewall rules applied."
+# Outgoing packets need to be "accepted," otherwise
+# they won't actually make it out.
+chain output {
+    # Allow all outbound traffic.
+    type filter hook output priority 0; policy accept;
+}
+
+
+}
+EOF
+
+
+arch-chroot /mnt chmod 640 /etc/nftables.conf
+arch-chroot /mnt systemctl enable nftables.service
+
+log "✅ Simple nftables firewall configured"
+
+
+}
