@@ -363,25 +363,44 @@ log "✅ Systemd-boot configured"
 
 }
 
-# setup_network_security() function
+# setup_network_security() function - FIXED
+
 setup_network_security() {
-    log "🌐 Setting up network security with UFW..."
+log “🌐 Setting up network security with UFW…”
 
-    # Enable NetworkManager for connectivity
-    arch-chroot /mnt systemctl enable NetworkManager.service
+```
+# Enable NetworkManager for connectivity
+arch-chroot /mnt systemctl enable NetworkManager.service
 
-    # Apply secure UFW defaults
-    # By default, deny all incoming and allow all outgoing traffic
-    arch-chroot /mnt ufw default deny incoming
-    arch-chroot /mnt ufw default allow outgoing
+# Enable UFW service but don't start it in chroot
+arch-chroot /mnt systemctl enable ufw.service
 
-    # Allow SSH connections. Your script hardens SSH, so it should be accessible.
-    #arch-chroot /mnt ufw allow ssh
+# Configure UFW defaults without enabling (will apply on first boot)
+cat > /mnt/etc/ufw/ufw.conf << 'EOF'
+```
 
-    # Enable the firewall
-    arch-chroot /mnt ufw enable
+ENABLED=yes
+LOGLEVEL=low
+EOF
 
-    log "✅ UFW configured and enabled with secure defaults."
+```
+cat > /mnt/etc/default/ufw << 'EOF'
+```
+
+IPV6=yes
+DEFAULT_INPUT_POLICY=“DROP”
+DEFAULT_OUTPUT_POLICY=“ACCEPT”
+DEFAULT_FORWARD_POLICY=“DROP”
+DEFAULT_APPLICATION_POLICY=“SKIP”
+MANAGE_BUILTINS=no
+IPT_SYSCTL=/etc/ufw/sysctl.conf
+IPT_MODULES=””
+EOF
+
+```
+log "✅ UFW configured for secure defaults on first boot."
+```
+
 }
 
 # Setup container environment
