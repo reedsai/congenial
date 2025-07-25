@@ -196,7 +196,7 @@ log "📁 Mounting filesystem with security optimizations…"
 mount -o "$BTRFS_MOUNT_OPTS,subvol=@" /dev/mapper/cryptroot /mnt
 
 # Create mount points
-mkdir -p /mnt/{home,var,opt,containers,snapshots,boot}
+mkdir -p /mnt/{home,var,opt,containers,.snapshots,boot}
 
 # Mount subvolumes with security options
 mount -o "$BTRFS_MOUNT_OPTS,subvol=@home" /dev/mapper/cryptroot /mnt/home
@@ -231,7 +231,7 @@ pacstrap -K /mnt \
     cryptsetup \
     networkmanager \
     apparmor \
-    firewalld \
+    ufw \
     git \
     vim \
     sudo \
@@ -364,20 +364,25 @@ log "✅ Systemd-boot configured"
 
 }
 
-# Setup network security
-
+# setup_network_security() function
 setup_network_security() {
-log "🌐 Setting up network security…"
+    log "🌐 Setting up network security with UFW..."
 
-# Enable NetworkManager
-arch-chroot /mnt systemctl enable NetworkManager.service
+    # Enable NetworkManager for connectivity
+    arch-chroot /mnt systemctl enable NetworkManager.service
 
-# Configure firewalld
-arch-chroot /mnt systemctl enable firewalld.service
+    # Apply secure UFW defaults
+    # By default, deny all incoming and allow all outgoing traffic
+    arch-chroot /mnt ufw default deny incoming
+    arch-chroot /mnt ufw default allow outgoing
 
-log "✅ Network security configured"
+    # Allow SSH connections. Your script hardens SSH, so it should be accessible.
+    #arch-chroot /mnt ufw allow ssh
 
+    # Enable the firewall
+    arch-chroot /mnt ufw enable
 
+    log "✅ UFW configured and enabled with secure defaults."
 }
 
 # Setup container environment
