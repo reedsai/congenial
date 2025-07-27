@@ -1,0 +1,197 @@
+## Streaming Server Analysis
+
+**Norway**: Limited - works for Nordic content, some EU services
+**US**: Best - works for Netflix US, Hulu, HBO Max, Disney+, most services
+**Netherlands**: Good - works for most EU content, some US services
+
+**Recommendation: Use US for streaming**
+
+## Setup 3 VPN Servers with Kill Switch + Firewall
+
+```bash
+# Download 3 configs from Mulvad
+# 1. Germany (speed): mullvad-de-fra.conf  
+# 2. Sweden (privacy): mullvad-se-got.conf
+# 3. US (streaming): mullvad-us-nyc.conf
+
+# Move to profiles
+sudo cp ~/Downloads/mullvad-de-fra.conf /etc/wireguard/profiles/speed.conf
+sudo cp ~/Downloads/mullvad-se-got.conf /etc/wireguard/profiles/privacy.conf  
+sudo cp ~/Downloads/mullvad-us-nyc.conf /etc/wireguard/profiles/streaming.conf
+
+# Remove DNS lines
+sudo sed -i '/^DNS/d' /etc/wireguard/profiles/*.conf
+sudo chmod 600 /etc/wireguard/profiles/*.conf
+```
+
+## Enhanced Firewall + Kill Switch Script
+
+```bash
+sudo tee /usr/local/bin/vpn-firewall << 'EOF'
+#!/bin/bash
+
+setup_kill_switch() {
+    local vpn_interface="$1"
+    
+    # Remove old kill switch rules
+    sudo iptables -D OUTPUT ! -o lo -m mark ! --mark 51820 -m addrtype ! --dst-type LOCAL -j REJECT 2>/dev/null || true
+    
+    # Get interface mark
+    local fwmark=$(wg show "$vpn_interface" fwmark 2>/dev/null || echo "51820")
+    
+    # Kill switch: block all non-VPN traffic
+    sudo iptables -I OUTPUT 1 ! -o "$vpn_interface" -m mark ! --mark "$fwmark" -m addrtype ! --dst-type LOCAL -j REJECT
+    sudo iptables -I OUTPUT 1 -o lo -j ACCEPT
+    
+    echo "Kill switch enabled for $vpn_interface"
+}
+
+setup_server_rules() {
+    local server_ip="$1"
+    local port="$2"
+    
+    # Clear old server rules
+    sudo iptables -D OUTPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || true
+    sudo iptables -D OUTPUT -p udp --dport 53981 -j ACCEPT 2>/dev/null || true
+    
+    # Allow WireGuard to specific server
+    sudo iptables -I OUTPUT 1 -d "$server_ip" -p udp --dport "$port" -j ACCEPT
+    
+    # Allow VPN interface traffic
+    sudo iptables -I OUTPUT 1 -o wg+ -j ACCEPT
+    sudo iptables -I INPUT 1 -i wg+ -j ACCEPT
+    
+    echo "Firewall rules set for $server_ip:$port"
+}
+
+case "$1" in
+    speed)
+        # Germany server
+        setup_server_rules "185.213.154.68" "51820"
+        setup_kill_switch "wg-mulvad"
+        ;;
+    privacy)
+        # Sweden server  
+        setup_server_rules "185.213.154.131" "51820"
+        setup_kill_switch "wg-mulvad"
+        ;;
+    streaming)
+        # US server
+        setup_server_rules "169.150.218.102" "51820" 
+        setup_kill_switch "wg-mulvad"
+        ;;
+    clear)
+        # Remove all VPN rules
+        sudo iptables -D OUTPUT ! -o lo -m mark ! --mark 51820 -m addrtype ! --dst-type LOCAL -j REJECT 2>/dev/null || true
+        sudo iptables -D OUTPUT -o wg+ -j ACCEPT 2>/dev/null || true
+        sudo iptables -D INPUT -i wg+ -j ACCEPT 2>/dev/null || true
+        echo "VPN rules cleared"
+        ;;
+    *)
+        echo "Usage: $0 [speed|privacy|streaming|clear]"
+        exit 1
+        ;;
+esac
+
+# Save rules
+sudo iptables-save | sudo tee /etc/iptables/iptables.rules > /dev/null
+echo "Firewall rules saved"
+EOF
+
+sudo chmod +x /usr/local/bin/vpn-firewall
+```
+
+## Updated VPN Switch Script
+
+```bash
+sudo tee /usr/local/bin/vpn-switch << 'EOF'
+#!/bin/bash
+
+PROFILES_DIR="/etc/wireguard/profiles"
+ACTIVE_CONFIG="/etc/wireguard/mulvad.conf"
+
+switch_profile() {
+    local profile="$1"
+    local config_file="$PROFILES_DIR/$profile.conf"
+    
+    if [ ! -f "$config_file" ]; then
+        echo "Profile '$profile' not found"
+        exit 1
+    fi
+    
+    echo "Switching to $profile profile..."
+    
+    # Stop current VPN
+    sudo systemctl stop wg-quick@mulvad 2>/dev/null || true
+    
+    # Setup firewall + kill switch for this profile
+    vpn-firewall "$profile"
+    
+    # Switch config
+    sudo rm -f "$ACTIVE_CONFIG"
+    sudo ln -sf "$config_file" "$ACTIVE_CONFIG"
+    
+    # Start VPN
+    if sudo systemctl start wg-quick@mulvad; then
+        echo "✅ $profile profile active"
+        sleep 2
+        curl -s http://ipinfo.io/ip
+    else
+        echo "❌ Failed to start $profile"
+        exit 1
+    fi
+}
+
+case "$1" in
+    speed|privacy|streaming)
+        switch_profile "$1"
+        ;;
+    off)
+        sudo systemctl stop wg-quick@mulvad
+        vpn-firewall clear
+        echo "✅ VPN disconnected"
+        ;;
+    status)
+        if systemctl is-active --quiet wg-quick@mulvad; then
+            echo "VPN: Connected"
+            curl -s http://ipinfo.io/ip
+        else
+            echo "VPN: Disconnected"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 [speed|privacy|streaming|off|status]"
+        echo "  speed     - Germany (low latency)"
+        echo "  privacy   - Sweden (anonymity)" 
+        echo "  streaming - US (Netflix/Hulu)"
+        exit 1
+        ;;
+esac
+EOF
+
+sudo chmod +x /usr/local/bin/vpn-switch
+```
+
+## Test Kill Switch
+
+```bash
+# Start VPN
+vpn-switch streaming
+
+# Kill switch test - should fail
+sudo systemctl stop wg-quick@mulvad
+curl -s http://ipinfo.io/ip  # Should timeout/fail
+
+# Restart VPN - should work
+sudo systemctl start wg-quick@mulvad
+curl -s http://ipinfo.io/ip  # Should show US IP
+```
+
+**Usage:**
+
+- `vpn-switch speed` - Germany (gaming/work)
+- `vpn-switch privacy` - Sweden (anonymity)
+- `vpn-switch streaming` - US (Netflix/streaming)
+- `vpn-switch off` - Disconnect + clear rules
+
+Each profile has dedicated firewall rules and kill switch protection.​​​​​​​​​​​​​​​​
