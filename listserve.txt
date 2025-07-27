@@ -1,0 +1,46 @@
+# Fetches, filters, and displays a list of Mullvad bridge servers that support v2ray.
+# Includes a fallback to a less strict filter if the primary method fails.
+list_servers() {
+    info "Fetching server list from Mullvad API..."
+    local response
+    response=$(curl -sS --fail "$MULLVAD_API_URL" || error "Failed to fetch server list from Mullvad API.")
+
+    info "Attempting to filter for specific stboot (RAM-based) bridge servers..."
+    # [span_0](start_span)[span_1](start_span)Primary, strict filter based on the original documentation[span_0](end_span)[span_1](end_span)
+    local servers
+    servers=$(echo "$response" | jq -r '
+       .countries[].cities[].relays[] |
+        select(.active == true and .type == "bridge" and .stboot == true) |
+        "\(.hostname)|\(.country_name)|\(.city_name)|\(.ipv4_addr_in)"
+    ')
+
+    # Fallback mechanism if the strict filter finds nothing
+    if [[ -z "$servers" ]]; then
+        info "${YELLOW}[WARNING]${NC} No specific stboot bridge servers found. Falling back to a broader search for any active bridge server."
+        servers=$(echo "$response" | jq -r '
+           .countries[].cities[].relays[] |
+            select(.active == true and .type == "bridge") |
+            "\(.hostname)|\(.country_name)|\(.city_name)|\(.ipv4_addr_in)"
+        ')
+    fi
+
+    if [[ -z "$servers" ]]; then
+        error "Fallback failed. No active bridge servers of any type were found in the API response."
+    fi
+
+    echo -e "${YELLOW}Available WGoSS Bridge Servers:${NC}"
+    echo "------------------------------------------------------------------------"
+    printf "%-5s %-20s %-20s %s\n" "ID" "Country" "City" "Hostname"
+    echo "------------------------------------------------------------------------"
+    local i=1
+    while IFS= read -r line; do
+        local hostname city country
+        hostname=$(echo "$line" | cut -d'|' -f1)
+        country=$(echo "$line" | cut -d'|' -f2)
+        city=$(echo "$line" | cut -d'|' -f3)
+        printf "%-5s %-20s %-20s %s\n" "[$i]" "$country" "$city" "$hostname"
+        i=$((i+1))
+    done <<< "$servers"
+    echo "------------------------------------------------------------------------"
+    echo "$servers" > "$TMP_DIR/server_list.txt"
+}
