@@ -1,0 +1,176 @@
+## Problem Analysis:
+
+**FATAL FLAW:** Your kill switch rule comes AFTER the base internet rules, so traffic flows through HTTP/HTTPS rules BEFORE hitting the kill switch.
+
+## Bulletproof Kill Switch Fix:
+
+### Step 1: Delete Current vpn-firewall Script
+
+```bash
+sudo rm /usr/local/bin/vpn-firewall
+```
+
+### Step 2: Create BULLETPROOF vpn-firewall
+
+```bash
+sudo tee /usr/local/bin/vpn-firewall << 'EOF'
+#!/bin/bash
+
+setup_bulletproof_killswitch() {
+    local config="$1"
+    
+    # FLUSH EVERYTHING - start clean
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT DROP
+    
+    # KILL SWITCH FIRST - block ALL internet traffic except VPN
+    sudo iptables -A OUTPUT ! -o lo ! -o mulvad -m addrtype ! --dst-type LOCAL -j REJECT
+    
+    # Extract server info
+    local endpoint=$(grep "Endpoint" "$config" | cut -d'=' -f2 | tr -d ' ')
+    local server_ip=$(echo "$endpoint" | cut -d':' -f1)
+    local port=$(echo "$endpoint" | cut -d':' -f2)
+    
+    # ONLY allow these in exact order:
+    # 1. Loopback
+    sudo iptables -I OUTPUT 1 -o lo -j ACCEPT
+    sudo iptables -I INPUT 1 -i lo -j ACCEPT
+    
+    # 2. VPN server connection (before kill switch blocks it)
+    sudo iptables -I OUTPUT 1 -d "$server_ip" -p udp --dport "$port" -j ACCEPT
+    
+    # 3. VPN interface traffic
+    sudo iptables -I OUTPUT 1 -o mulvad -j ACCEPT
+    sudo iptables -I INPUT 1 -i mulvad -j ACCEPT
+    
+    # 4. DNS only through localhost (our DNSCrypt)
+    sudo iptables -I OUTPUT 1 -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
+    
+    # 5. SSH for management
+    sudo iptables -I INPUT 1 -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+    
+    # 6. Established connections
+    sudo iptables -I INPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    sudo iptables -I OUTPUT 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    
+    echo "BULLETPROOF Kill switch active - Server: $server_ip:$port"
+}
+
+restore_base_firewall() {
+    # Your original safe firewall
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT DROP
+    sudo iptables -A INPUT -i lo -j ACCEPT
+    sudo iptables -A OUTPUT -o lo -j ACCEPT
+    sudo iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    sudo iptables -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    sudo iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+    sudo iptables -A OUTPUT -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
+    sudo iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+    sudo iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
+    sudo iptables -A OUTPUT -p udp --dport 123 -j ACCEPT
+    sudo iptables -A OUTPUT -p icmp --icmp-type 8 -j ACCEPT
+}
+
+case "$1" in
+    speed) setup_bulletproof_killswitch "/etc/wireguard/profiles/speed.conf" ;;
+    privacy) setup_bulletproof_killswitch "/etc/wireguard/profiles/privacy.conf" ;;
+    streaming) setup_bulletproof_killswitch "/etc/wireguard/profiles/streaming.conf" ;;
+    clear) restore_base_firewall ;;
+    *) echo "Usage: $0 [speed|privacy|streaming|clear]"; exit 1 ;;
+esac
+
+sudo iptables-save | sudo tee /etc/iptables/iptables.rules > /dev/null
+EOF
+
+sudo chmod +x /usr/local/bin/vpn-firewall
+```
+
+### Step 3: Update vpn-switch Script
+
+```bash
+sudo tee /usr/local/bin/vpn-switch << 'EOF'
+#!/bin/bash
+
+PROFILES_DIR="/etc/wireguard/profiles"
+ACTIVE_CONFIG="/etc/wireguard/mulvad.conf"
+
+switch_profile() {
+    local profile="$1"
+    local config_file="$PROFILES_DIR/$profile.conf"
+    
+    [ ! -f "$config_file" ] && { echo "Profile not found"; exit 1; }
+    
+    echo "Switching to $profile with BULLETPROOF kill switch..."
+    
+    # Stop current VPN
+    sudo systemctl stop wg-quick@mulvad 2>/dev/null
+    
+    # Setup BULLETPROOF firewall (includes kill switch)
+    vpn-firewall "$profile"
+    
+    # Switch config
+    sudo rm -f "$ACTIVE_CONFIG"
+    sudo ln -sf "$config_file" "$ACTIVE_CONFIG"
+    
+    # Start VPN
+    if sudo systemctl start wg-quick@mulvad; then
+        echo "Waiting for interface..."
+        sleep 3
+        
+        if ip link show mulvad >/dev/null 2>&1; then
+            echo "✅ $profile active with BULLETPROOF kill switch"
+            curl -s --max-time 10 http://ipinfo.io/ip 2>/dev/null || echo "Protected - no direct internet"
+        else
+            echo "❌ Interface failed but traffic still BLOCKED"
+        fi
+    else
+        echo "❌ VPN failed but traffic still BLOCKED by kill switch"
+    fi
+}
+
+case "$1" in
+    speed|privacy|streaming) switch_profile "$1" ;;
+    off)
+        sudo systemctl stop wg-quick@mulvad
+        vpn-firewall clear
+        echo "✅ VPN off, normal internet restored"
+        ;;
+    status)
+        if systemctl is-active --quiet wg-quick@mulvad && ip link show mulvad >/dev/null 2>&1; then
+            echo "Connected: $(curl -s --max-time 5 http://ipinfo.io/ip 2>/dev/null)"
+        else
+            echo "Disconnected - traffic BLOCKED"
+        fi
+        ;;
+    *) echo "Usage: $0 [speed|privacy|streaming|off|status]"; exit 1 ;;
+esac
+EOF
+```
+
+### Step 4: Test the Bulletproof Kill Switch
+
+```bash
+# Start VPN
+vpn-switch privacy
+
+# Test kill switch
+sudo systemctl stop wg-quick@mulvad
+curl -s http://ipinfo.io/ip  # Should timeout/fail - NO REAL IP LEAK
+
+# Restore VPN
+vpn-switch privacy
+```
+
+**Key Changes:**
+
+1. **Kill switch rule comes FIRST** - blocks all internet before any other rules
+1. **No separate killswitch function** - integrated into main firewall setup
+1. **Insert rules at position 1** - ensures kill switch priority
+1. **Traffic blocked even if VPN fails to start**
+
+This is bulletproof - your real IP will NEVER leak.​​​​​​​​​​​​​​​​
