@@ -1,0 +1,111 @@
+#!/bin/bash
+
+sudo tee /usr/local/bin/vpn-switch << ‘EOF’
+#!/bin/bash
+
+PROFILES_DIR=”/etc/wireguard/profiles”
+ACTIVE_CONFIG=”/etc/wireguard/mulvad.conf”
+
+setup_killswitch() {
+local config=”$1”
+local endpoint=$(grep “Endpoint” “$config” | cut -d’=’ -f2 | tr -d ’ ‘)
+local server_ip=$(echo “$endpoint” | cut -d’:’ -f1)
+local port=$(echo “$endpoint” | cut -d’:’ -f2)
+
+```
+sudo iptables -F && sudo iptables -X
+sudo iptables -P INPUT ACCEPT && sudo iptables -P FORWARD ACCEPT && sudo iptables -P OUTPUT ACCEPT
+
+# Allow loopback
+sudo iptables -A INPUT -i lo -j ACCEPT
+sudo iptables -A OUTPUT -o lo -j ACCEPT
+
+# Allow VPN server connection
+sudo iptables -A OUTPUT -d "$server_ip" -p udp --dport "$port" -j ACCEPT
+sudo iptables -A INPUT -s "$server_ip" -p udp --sport "$port" -j ACCEPT
+
+# Allow established connections
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow VPN interface traffic
+sudo iptables -A OUTPUT -o mulvad -j ACCEPT
+sudo iptables -A INPUT -i mulvad -j ACCEPT
+
+# Drop everything else and set policies
+sudo iptables -P INPUT DROP
+sudo iptables -P FORWARD DROP  
+sudo iptables -P OUTPUT DROP
+```
+
+}
+
+restore_firewall() {
+sudo iptables -F && sudo iptables -X
+sudo iptables -P INPUT ACCEPT && sudo iptables -P FORWARD ACCEPT && sudo iptables -P OUTPUT ACCEPT
+}
+
+switch_profile() {
+local profile=”$1”
+local config_file=”$PROFILES_DIR/$profile.conf”
+
+```
+[ ! -f "$config_file" ] && { echo "❌ Profile $profile not found"; exit 1; }
+
+echo "🔥 Switching to $profile..."
+
+# Stop existing connection
+sudo systemctl stop wg-quick@mulvad 2>/dev/null
+sudo ip link delete mulvad 2>/dev/null
+
+# Setup firewall before connecting
+setup_killswitch "$config_file"
+
+# Create symlink
+sudo rm -f "$ACTIVE_CONFIG"
+sudo ln -sf "$config_file" "$ACTIVE_CONFIG"
+
+# Start VPN
+if sudo systemctl start wg-quick@mulvad; then
+    sleep 3
+    if ip link show mulvad >/dev/null 2>&1; then
+        echo "✅ $profile ACTIVE"
+        CURRENT_IP=$(timeout 10 curl -s --interface mulvad http://ipinfo.io/ip 2>/dev/null)
+        [ -n "$CURRENT_IP" ] && echo "🌍 IP: $CURRENT_IP" || echo "🔒 Protected (IP check failed)"
+    else
+        echo "❌ Interface failed - LOCKDOWN ACTIVE"
+    fi
+else
+    echo "❌ VPN failed - LOCKDOWN ACTIVE"
+fi
+
+sudo iptables-save > /etc/iptables/iptables.rules 2>/dev/null
+```
+
+}
+
+case “$1” in
+speed|privacy|streaming) switch_profile “$1” ;;
+off)
+sudo systemctl stop wg-quick@mulvad
+sudo ip link delete mulvad 2>/dev/null
+restore_firewall
+sudo iptables-save > /etc/iptables/iptables.rules 2>/dev/null
+echo “✅ VPN off”
+;;
+status)
+if systemctl is-active –quiet wg-quick@mulvad && ip link show mulvad >/dev/null 2>&1; then
+CURRENT_IP=$(timeout 5 curl -s http://ipinfo.io/ip 2>/dev/null)
+echo “🟢 ACTIVE: ${CURRENT_IP:-Unknown}”
+else
+echo “🔴 LOCKDOWN”
+fi
+;;
+*)
+echo “Usage: $0 [speed|privacy|streaming|off|status]”
+exit 1
+;;
+esac
+EOF
+
+sudo chmod +x /usr/local/bin/vpn-switch
