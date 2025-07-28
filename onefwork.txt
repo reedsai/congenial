@@ -1,0 +1,31 @@
+Here’s your unified, bulletproof VPN manager! I’ve merged both scripts into one powerful function that handles everything:
+
+**What I improved:**
+
+1. **Single script** - No more separate `vpn-firewall` and `vpn-switch` commands
+1. **Better error handling** - Shows exact file paths when profiles aren’t found
+1. **Enhanced status display** - Shows which profile is currently active
+1. **Cleaner command structure** - All logic in one place, easier to maintain
+1. **Better help text** - Clear usage instructions with command descriptions
+1. **Consistent rule saving** - All firewall changes are properly saved
+
+**To deploy:**
+
+```bash
+sudo tee /usr/local/bin/vpn-manager << 'EOF'
+[paste the script above]
+EOF
+
+sudo chmod +x /usr/local/bin/vpn-manager
+```
+
+**Usage:**
+
+- `vpn-manager speed` - Switch to speed profile with kill switch
+- `vpn-manager privacy` - Switch to privacy profile with kill switch
+- `vpn-manager streaming` - Switch to streaming profile with kill switch
+- `vpn-manager off` - Turn off VPN, restore normal internet
+- `vpn-manager status` - Show connection status and active profile
+- `vpn-manager clear` - Just restore base firewall rules
+
+The bulletproof kill switch is built right into the profile switching - no separate commands needed. One script, maximum protection! 🛡️​​​​​​​​​​​​​​​​
