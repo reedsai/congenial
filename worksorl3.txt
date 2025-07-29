@@ -1,0 +1,236 @@
+#!/bin/bash
+
+# State-Aware VPN Manager with Obfuscation & Bulletproof Kill Switch
+# v2.1 - Cleaned and verified
+
+# Usage: vpn-manager [privacy|obfuscated <profile>|off|status]
+
+PROFILES_DIR="/etc/wireguard/profiles"
+ACTIVE_CONFIG="/etc/wireguard/mulvad.conf"
+VPN_INTERFACE="mulvad"
+SS_PID_FILE="/run/ss-local.pid"
+
+# --- Firewall state for obfuscation handshake ---
+apply_obfuscation_handshake_rules() {
+    local bridge_ip="$1"
+    local bridge_port="$2"
+
+    echo "Applying OBFUSCATION HANDSHAKE rules..."
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT DROP
+
+    # Allow local loopback and DNS to local resolver
+    sudo iptables -A OUTPUT -o lo -j ACCEPT
+    sudo iptables -A INPUT -i lo -j ACCEPT
+    sudo iptables -A OUTPUT -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
+
+    # ONLY allow the Shadowsocks client to connect to the Mullvad bridge server
+    sudo iptables -A OUTPUT -d "$bridge_ip" -p tcp --dport "$bridge_port" -j ACCEPT
+    
+    # Allow established connections back in (for SSH, etc.)
+    sudo iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    echo "OBFUSCATION HANDSHAKE active - only proxy connection to $bridge_ip:$bridge_port allowed."
+}
+
+apply_lockdown_rules() {
+    local server_ip="$1"
+    local port="$2"
+
+    echo "Applying LOCKDOWN rules..."
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT DROP
+
+    # Essential services only
+    sudo iptables -A OUTPUT -o lo -j ACCEPT
+    sudo iptables -A INPUT -i lo -j ACCEPT
+    sudo iptables -A OUTPUT -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
+    sudo iptables -A INPUT -p tcp --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+    sudo iptables -A OUTPUT -p tcp --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+    # ONLY allow VPN handshake
+    sudo iptables -A OUTPUT -d "$server_ip" -p udp --dport "$port" -j ACCEPT
+    sudo iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    echo "LOCKDOWN active - only VPN handshake allowed to $server_ip:$port"
+}
+
+apply_active_rules() {
+    echo "VPN connected. Applying ACTIVE rules..."
+    sudo iptables -F
+    sudo iptables -P INPUT DROP
+    sudo iptables -P FORWARD DROP
+    sudo iptables -P OUTPUT DROP
+
+    # Allow all traffic going out the VPN interface. This is the main kill switch rule.
+    sudo iptables -A OUTPUT -o "$VPN_INTERFACE" -j ACCEPT
+    
+    # Allow established connections to receive responses through the VPN
+    sudo iptables -A INPUT -i "$VPN_INTERFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    
+    # Allow local services to talk to the local DNS resolver (dnscrypt-proxy)
+    sudo iptables -A OUTPUT -d 127.0.0.1 -p udp --dport 53 -j ACCEPT
+
+    # Allow local loopback traffic for system services
+    sudo iptables -A OUTPUT -o lo -j ACCEPT
+    sudo iptables -A INPUT -i lo -j ACCEPT
+
+    # Block local networks (kill switch enhancement)
+    sudo iptables -A OUTPUT -d 192.168.0.0/16 -j DROP
+    sudo iptables -A OUTPUT -d 172.16.0.0/12 -j DROP
+    sudo iptables -A OUTPUT -d 10.0.0.0/8 -j DROP
+
+    echo "ACTIVE rules applied - traffic locked to VPN tunnel"
+}
+
+restore_base_firewall() {
+    # This function is now your "normal internet" ruleset
+    sudo iptables -F
+    sudo iptables -P INPUT ACCEPT
+    sudo iptables -P FORWARD ACCEPT
+    sudo iptables -P OUTPUT ACCEPT
+    sudo iptables-save | sudo tee /etc/iptables/iptables.rules > /dev/null
+}
+
+switch_obfuscated_profile() {
+    local profile="$1"
+    local wg_config_file="$PROFILES_DIR/$profile.conf"
+    local ss_config_file="$PROFILES_DIR/$profile.json"
+
+    if [ ! -f "$wg_config_file" ] || [ ! -f "$ss_config_file" ]; then
+        echo "Profile files not found for: $profile"
+        echo "Expected: $wg_config_file and $ss_config_file"
+        exit 1
+    fi
+
+    echo "Switching to OBFUSCATED profile $profile..."
+    turn_off_vpn # Clean slate
+
+    # Extract bridge server info from the JSON file
+    local bridge_server=$(grep '"server"' "$ss_config_file" | cut -d'"' -f4)
+    local bridge_port=$(grep '"server_port"' "$ss_config_file" | cut -d':' -f2 | tr -d ' ,')
+
+    # PHASE 1: Obfuscation Handshake Firewall
+    apply_obfuscation_handshake_rules "$bridge_server" "$bridge_port"
+
+    # Start the local Shadowsocks proxy in the background
+    echo "Starting local obfuscation proxy..."
+    sudo ss-local -c "$ss_config_file" -f "$SS_PID_FILE"
+    sleep 2
+
+    # Switch WireGuard config
+    sudo rm -f "$ACTIVE_CONFIG"
+    sudo ln -s "$wg_config_file" "$ACTIVE_CONFIG"
+
+    # PHASE 2: Start WireGuard (which connects through the local proxy)
+    echo "Starting WireGuard service through the proxy..."
+    if sudo systemctl start wg-quick@mulvad && sleep 3 && ip link show mulvad >/dev/null 2>&1; then
+        # PHASE 3: Apply the final, strict kill switch
+        apply_active_rules
+        local ip
+        ip=$(curl -s --max-time 10 https://ipv4.am.i.mullvad.net/ip)
+        echo "✅ Obfuscated profile '$profile' active. IP: $ip"
+    else
+        echo "❌ VPN failed to connect - system remains in OBFUSCATION HANDSHAKE LOCKDOWN"
+        echo "   Run 'vpn-manager off' to restore internet"
+    fi
+}
+
+switch_profile() {
+    local profile="$1"
+    local config_file="$PROFILES_DIR/$profile.conf"
+
+    if [ ! -f "$config_file" ]; then
+        echo "Profile not found: $config_file"
+        exit 1
+    fi
+
+    echo "Switching to standard profile $profile..."
+    turn_off_vpn # Clean slate
+
+    local endpoint=$(grep "Endpoint" "$config_file" | cut -d'=' -f2 | tr -d ' ')
+    local server_ip=$(echo "$endpoint" | cut -d':' -f1)
+    local port=$(echo "$endpoint" | cut -d':' -f2)
+
+    apply_lockdown_rules "$server_ip" "$port"
+
+    sudo rm -f "$ACTIVE_CONFIG"
+    sudo ln -s "$config_file" "$ACTIVE_CONFIG"
+
+    if sudo systemctl start wg-quick@mulvad && sleep 3 && ip link show mulvad >/dev/null 2>&1; then
+        apply_active_rules
+        local ip
+        ip=$(curl -s --max-time 10 https://ipv4.am.i.mullvad.net/ip)
+        echo "✅ Profile '$profile' active. IP: $ip"
+    else
+        echo "❌ VPN failed to connect - system remains in LOCKDOWN"
+        echo "   Run 'vpn-manager off' to restore internet"
+    fi
+}
+
+turn_off_vpn() {
+    echo "Turning off VPN and restoring base firewall..."
+    sudo systemctl stop wg-quick@mulvad 2>/dev/null || true
+
+    if [ -f "$SS_PID_FILE" ]; then
+        echo "Stopping obfuscation proxy..."
+        sudo kill "$(cat "$SS_PID_FILE")"
+        sudo rm -f "$SS_PID_FILE"
+    fi
+
+    restore_base_firewall
+    echo "✅ VPN off, normal internet restored."
+}
+
+show_status() {
+    if systemctl is-active --quiet wg-quick@mulvad; then
+        local ip
+        ip=$(curl -s --max-time 5 https://ipv4.am.i.mullvad.net/ip)
+        local profile=$(basename "$(readlink "$ACTIVE_CONFIG")" .conf)
+        
+        echo "✅ Connected via profile: $profile"
+        echo "   IP: $ip"
+
+        if [ -f "$SS_PID_FILE" ]; then
+            echo "   Mode: Obfuscated (via Shadowsocks)"
+        else
+            echo "   Mode: Standard WireGuard"
+        fi
+    else
+        echo "❌ Disconnected"
+    fi
+}
+
+case "$1" in
+    privacy|speed|streaming)
+        switch_profile "$1"
+        ;;
+    obfuscated)
+        if [ -z "$2" ]; then
+            echo "Error: 'obfuscated' command requires a profile name."
+            echo "Usage: $0 obfuscated <profile_name>"
+            exit 1
+        fi
+        switch_obfuscated_profile "$2"
+        ;;
+    off)
+        turn_off_vpn
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "Usage: $0 [command] [options]"
+        echo ""
+        echo "Commands:"
+        echo "  privacy|speed|streaming   - Switch to a standard profile (e.g., 'privacy')"
+        echo "  obfuscated <profile_name> - Switch to an obfuscated profile (e.g., 'obfuscated mullvad-tr1')"
+        echo "  off                       - Turn off VPN and restore normal internet"
+        echo "  status                    - Show current connection status"
+        exit 1
+        ;;
+esac
